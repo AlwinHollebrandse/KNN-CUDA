@@ -97,19 +97,46 @@ int kVoting(int k, float (*shortestKDistances)[2]) {
     return voteResult;
 }
 
-// TODO convert to TILED
+// TODO not needed?
+__global__ void fillDistanceMatrixTiled(float *A, float *B, float *C, int width) {
+    int column = ( blockDim.x * blockIdx.x ) + threadIdx.x;
+	int row    = ( blockDim.y * blockIdx.y ) + threadIdx.y;
+	
+    float sum = 0;
+
+    // Loop over the A and B tiles required to compute the submatrix
+    for (int t = 0; t < width/TILE_WIDTH; t++)
+    {
+        __shared__ float sub_A[TILE_WIDTH][TILE_WIDTH];
+        __shared__ float sub_B[TILE_WIDTH][TILE_WIDTH];
+        
+        // Coolaborative loading of A and B tiles into shared memory
+        sub_A[threadIdx.y][threadIdx.x] = A[row*width + (t*TILE_WIDTH + threadIdx.x)];
+        sub_B[threadIdx.y][threadIdx.x] = B[column + (t*TILE_WIDTH + threadIdx.y)*width];
+        
+        __syncthreads();
+    
+        // Loop within shared memory
+        for (int k = 0; k < TILE_WIDTH; k++)
+          sum += sub_A[threadIdx.y][k] * sub_B[k][threadIdx.x];
+      
+        __syncthreads();
+    }
+    
+    C[row*width + column] = sum;
+}
+
 __global__ void fillDistanceMatrix(float *d_datasetArray, float *d_distanceMatrix, int width, int numberOfAttributes) { // d_distanceMatrix is a square matrix
 	int column = ( blockDim.x * blockIdx.x ) + threadIdx.x; // TODO which is outer and inner?
 	int row    = ( blockDim.y * blockIdx.y ) + threadIdx.y;
 
 	if (row < width && column < width) {
 		if (row == column) {
-			d_distanceMatrix[row*width + column] = INT_MAX; // cant compare to to self TODO make large number? 
+			d_distanceMatrix[row*width + column] = INT_MAX; // cant compare to to self
 		} else {
 			float distance = 0;
 
 			for(int k = 0; k < numberOfAttributes - 1; k++) { // compute the distance between the two instances
-				// dataset->get_instance(i)->get(k)->operator float() - dataset->get_instance(j)->get(k)->operator float();
 				float diff = d_datasetArray[row * numberOfAttributes + k] - d_datasetArray[column * numberOfAttributes + k]; // one instance minus the other
 				distance += diff * diff;
 			}
@@ -199,6 +226,8 @@ int main(int argc, char* argv[])
     ArffParser parser(argv[1]);
 	ArffData *dataset = parser.parse();
 	int k = atoi(argv[2]);
+	if (k > dataset->num_instances())
+	k = dataset->num_instances();
 	
 	int datasetMatrixLength = dataset->num_instances();// TODO are tehse needed?
 	int datasetMatrixWidth = dataset->num_attributes();
