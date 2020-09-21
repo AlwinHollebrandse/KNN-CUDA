@@ -4,98 +4,12 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <map>
+#include <climits> 
+#include<algorithm> // for heap  
 #include "libarff/arff_parser.h"
 #include "libarff/arff_data.h"
 
 #define TILE_WIDTH 16
-
-__global__ void matrixMul(float *A, float *B, float *C, int width)
-{
-	int column = ( blockDim.x * blockIdx.x ) + threadIdx.x;
-	int row    = ( blockDim.y * blockIdx.y ) + threadIdx.y;
-
-	if (row < width && column < width)
-	{
-		float sum = 0;
-
-		for(int k = 0; k < width; k++)
-			sum += A[row * width + k] * B[k * width + column];
-
-		C[row*width + column] = sum;
-	}
-}
-
-__global__ void matrixMulTiled(float *A, float *B, float *C, int width)
-{
-    int column = ( blockDim.x * blockIdx.x ) + threadIdx.x;
-	int row    = ( blockDim.y * blockIdx.y ) + threadIdx.y;
-	
-    float sum = 0;
-
-    // Loop over the A and B tiles required to compute the submatrix
-    for (int t = 0; t < width/TILE_WIDTH; t++)
-    {
-        __shared__ float sub_A[TILE_WIDTH][TILE_WIDTH];
-        __shared__ float sub_B[TILE_WIDTH][TILE_WIDTH];
-        
-        // Coolaborative loading of A and B tiles into shared memory
-        sub_A[threadIdx.y][threadIdx.x] = A[row*width + (t*TILE_WIDTH + threadIdx.x)];
-        sub_B[threadIdx.y][threadIdx.x] = B[column + (t*TILE_WIDTH + threadIdx.y)*width];
-        
-        __syncthreads();
-    
-        // Loop within shared memory
-        for (int k = 0; k < TILE_WIDTH; k++)
-          sum += sub_A[threadIdx.y][k] * sub_B[k][threadIdx.x];
-      
-        __syncthreads();
-    }
-    
-    C[row*width + column] = sum;
-}
-
-void MatrixMultiplicationHost(float *A, float *B, float *C, int width)
-{
-	for (int i = 0; i < width; i++)
-		for (int j = 0; j < width; j++)
-		{
-			float sum = 0;
-
-			for (int k = 0; k < width; k++)
-				sum += A[i * width + k] * B[k * width + j];
-
-			C[i * width + j] = sum;
-		}
-}
-
-// A comparator function used by qsort 
-int compare(const void * arg1, const void * arg2) { 
-    int const *lhs = static_cast<int const*>(arg1);
-    int const *rhs = static_cast<int const*>(arg2);
-    return (lhs[0] < rhs[0]) ? -1
-        :  ((rhs[0] < lhs[0]) ? 1
-        :  (lhs[1] < rhs[1] ? -1
-        :  ((rhs[1] < lhs[1] ? 1 : 0))));
-} 
-
-// Performs majority voting using the first k first elements of an array
-int kVoting(int k, float (*shortestKDistances)[2]) {
-    std::map<float, int> classCounter;
-    for (int i = 0; i < k; i++) {
-        classCounter[shortestKDistances[i][1]]++;
-    }
-
-    int voteResult = -1;
-    int numberOfVotes = -1;
-    for (auto i : classCounter) {
-        if (i.second > numberOfVotes) {
-            numberOfVotes = i.second;
-            voteResult = i.first;
-        }
-    }
-
-    return voteResult;
-}
 
 // TODO not needed?
 __global__ void fillDistanceMatrixTiled(float *A, float *B, float *C, int width) {
@@ -167,26 +81,72 @@ __global__ void fillDistanceMatrix(float *d_datasetArray, float *d_distanceMatri
 // 	}
 // }
 
+struct DistanceAndClass {
+	float distance;
+	int assignedClass; // class is a reserved word
+};
+
+DistanceAndClass* newDistanceAndClass(float distance, int assignedClass) { 
+    DistanceAndClass* temp = new DistanceAndClass; 
+	temp->distance = distance; 
+	temp->assignedClass = assignedClass; 
+    return temp; 
+}
+
+struct DistanceAndClass_rank_greater_than {
+    bool operator()(DistanceAndClass* const a, DistanceAndClass* const b) const {
+        return a->distance > b->distance;
+    }
+};
+
+// Performs majority voting using the first k first elements of an array
+int kVoting(int k, float (*shortestKDistances)[2]) {
+    std::map<float, int> classCounter;
+    for (int i = 0; i < k; i++) {
+        classCounter[shortestKDistances[i][1]]++;
+    }
+
+    int voteResult = -1;
+    int numberOfVotes = -1;
+    for (auto i : classCounter) {
+        if (i.second > numberOfVotes) {
+            numberOfVotes = i.second;
+            voteResult = i.first;
+        }
+    }
+
+    return voteResult;
+}
+
+// Function to return k'th smallest element in a given array 
+void kthSmallest(std::vector<DistanceAndClass*> distanceAndClassVector, int k, float (*shortestKDistances)[2]) {
+	// build a min heap
+	std::make_heap(distanceAndClassVector.begin(), distanceAndClassVector.end(), DistanceAndClass_rank_greater_than());
+  
+    // Extract min (k) times 
+	for (int i = 0; i < k; i++) {
+		shortestKDistances[i][0] = distanceAndClassVector.front()->distance;
+		shortestKDistances[i][1] = (float)distanceAndClassVector.front()->assignedClass;
+		std::pop_heap (distanceAndClassVector.begin(), distanceAndClassVector.end(), DistanceAndClass_rank_greater_than());
+		distanceAndClassVector.pop_back();
+	}
+	printf("final: shortestKDistances[0]: %f, shortestKDistances[1]: %f\n", shortestKDistances[0], shortestKDistances[1]);
+}
+  
+
 void hostFindKNN(float *h_distanceMatrix, float *h_datasetArray, int *h_predictions, int width, int numberOfAttributes, int k) { // h_distanceMatrix is a square matrix
 	for (int i = 0; i < width; i++) {
-		float distancesAndClasses[width][2];
+		std::vector<DistanceAndClass*> distanceAndClassVector;
 
 		for (int j = 0; j < width; j++) {
-			// printf("i: %d, j: %d, distance: %f, class: %f\n", i, j, h_distanceMatrix[i*width + j], h_datasetArray[j*numberOfAttributes + numberOfAttributes -1]);
-			distancesAndClasses[j][0] = sqrt(h_distanceMatrix[i*width + j]); // distance
-			distancesAndClasses[j][1] = h_datasetArray[j*numberOfAttributes + numberOfAttributes -1]; // class
+			float distance = sqrt(h_distanceMatrix[i*width + j]);
+			int assignedClass = (int)h_datasetArray[j*numberOfAttributes + numberOfAttributes -1];
+			DistanceAndClass* distanceAndClass = newDistanceAndClass(distance, assignedClass);
+			distanceAndClassVector.push_back(distanceAndClass);
 		}
-		// for (int j = 0; j < width; j++) {
-		// 	printf("distance: %f, class: %f\n", distancesAndClasses[j][0], distancesAndClasses[j][1]);
-		// }
-
-		qsort(distancesAndClasses, width, (2 * sizeof(float)), compare); // TODO dont need to sort, need to find "k" shortest. Due to programming time contraints, this wasnt done yet
 
 		float shortestKDistances[k][2];
-		for(int j = 0; j < k; j++) {
-			shortestKDistances[j][0] = distancesAndClasses[j][0];
-			shortestKDistances[j][1] = distancesAndClasses[j][1];
-		}
+		kthSmallest(distanceAndClassVector, k, shortestKDistances);
 
 		h_predictions[i] = kVoting(k, shortestKDistances);
 	}
@@ -287,14 +247,6 @@ int main(int argc, char* argv[])
 	printf("GPU time to fill Distance Matrix %f ms\n", milliseconds);
 
 	cudaMemcpy(h_distanceMatrix, d_distanceMatrix, dataset->num_instances() * dataset->num_instances() * sizeof(int), cudaMemcpyDeviceToHost);
-
-	for (int i = 0; i < dataset->num_instances(); i++) {
-		for (int j = 0; j < dataset->num_instances(); j++) {
-			printf("%f, ", h_distanceMatrix[i * dataset->num_instances() + j]);
-		}
-		printf("\n");
-	}
-
 	
 	hostFindKNN(h_distanceMatrix, h_datasetArray, h_predictions, dataset->num_instances(), dataset->num_attributes(), k);
 
