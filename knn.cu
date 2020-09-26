@@ -5,7 +5,8 @@
 #include <stdint.h>
 #include <map>
 #include <climits> 
-#include<algorithm> // for heap  
+#include <cfloat>
+#include <algorithm> // for heap  
 #include "libarff/arff_parser.h"
 #include "libarff/arff_data.h"
 
@@ -46,7 +47,7 @@ __global__ void fillDistanceMatrix(float *d_datasetArray, float *d_distanceMatri
 
 	if (row < width && column < width) {
 		if (row == column) {
-			d_distanceMatrix[row*width + column] = INT_MAX; // cant compare to to self
+			d_distanceMatrix[row*width + column] = FLT_MAX; // cant compare to to self
 		} else {
 			float distance = 0;
 
@@ -130,9 +131,145 @@ void kthSmallest(std::vector<DistanceAndClass*> distanceAndClassVector, int k, f
 		std::pop_heap (distanceAndClassVector.begin(), distanceAndClassVector.end(), DistanceAndClass_rank_greater_than());
 		distanceAndClassVector.pop_back();
 	}
-	printf("final: shortestKDistances[0]: %f, shortestKDistances[1]: %f\n", shortestKDistances[0], shortestKDistances[1]);
+	// printf("final: shortestKDistances[0]: %f, shortestKDistances[1]: %f\n", shortestKDistances[0], shortestKDistances[1]);
 }
-  
+
+// void* smallestKMerge(float *result, float *distanceArr, int leftStartingIndex, int leftEndingIndex, int rightStartingIndex, int rightEndingIndex, int k) { // TODO include class array
+// 	int leftIndex = leftStartingIndex;
+// 	int rightIndex = rightStartingIndex;
+	
+// 	for (int i = 0; i < k; i++) {
+// 		if (distanceArr[leftIndex] < distanceArr[rightIndex]) {
+// 			result[i] = distanceArr[leftIndex];
+// 			leftIndex++;
+// 		} else {
+// 			result[i] = distanceArr[rightIndex];
+// 			rightIndex++;
+// 		}
+// 	}
+// }
+
+// Uses a shared memory reduction approach to find the smallest k values
+__global__ void deviceFindMinKNonOptimized(float *d_smallestK, float *d_distanceMatrix, int *d_actualClasses, int width, int k) { // NOTE, rn im assuming a row is passed in at once
+
+	__shared__ float sharedDistanceMemory[128];
+	// __shared__ int sharedClassMemory[128];
+
+    int tid = blockIdx.x*blockDim.x + threadIdx.x;
+	sharedDistanceMemory[threadIdx.x] = (tid < width) ? d_distanceMatrix[tid] : FLT_MAX;
+	// sharedClassMemory[threadIdx.x] = (tid < width) ? d_actualClasses[tid] : INT_MAX;
+
+    __syncthreads();
+
+    for (int s = blockDim.x/2; s > 0; s >>= 1) {
+		if (threadIdx.x < s) {
+			float minDistance = sharedDistanceMemory[threadIdx.x];
+			// int minClass = sharedClassMemory[threadIdx.x];
+
+			if (sharedDistanceMemory[threadIdx.x + s] < minDistance) {
+				minDistance = sharedDistanceMemory[threadIdx.x + s];
+				// minClass = sharedClassMemory[threadIdx.x + s];
+			}
+
+			sharedDistanceMemory[threadIdx.x] = minDistance; 
+			// sharedClassMemory[threadIdx.x] = minClass; 
+		}
+
+		__syncthreads();
+	}
+
+    // write result for this block to global memory
+    // if (threadIdx.x == 0)
+    //     atomicAdd(d_smallestK, sharedDistanceMemory[0]); // TODO how to map class to this..... but also need to set the min to a max value now...
+}
+
+// Uses a shared memory reduction approach to find the smallest k values
+__global__ void deviceFindMinK(float *smallestK, float *d_distanceMatrix, int *d_actualClasses, int width, int k) { // NOTE, rn im assuming a row is passed in at once
+	__shared__ float sharedDistanceMemory[128];// or do width? my thinking was to do this as per row of the matrix, so load a whole row (TODO SCALABLE?)
+	__shared__ int sharedClassMemory[128];
+
+
+    int tid = blockIdx.x*blockDim.x + threadIdx.x; // block is threadAmount * threadAmount (16,16)
+
+	sharedDistanceMemory[threadIdx.x] = (tid < width) ? d_distanceMatrix[tid] : FLT_MAX;
+	sharedClassMemory[threadIdx.x] = (tid < width) ? d_actualClasses[tid] : -1;
+
+	// printf("tid: %d, block: %d, threadIdx.x: %d, sharedDistanceMemory[threadIdx.x]: %f, sharedClassMemory[threadIdx.x]: %d\n", tid, blockIdx.x*blockDim.x, threadIdx.x, sharedDistanceMemory[threadIdx.x], sharedClassMemory[threadIdx.x]);
+	
+	// if (threadIdx.x == 0) {
+	// 	// printf("\n pre block 1 shared mem. k = %d:\n", k);
+	// 	for (int i = 0; i < 128; i++) {
+	// 		printf("%f, ", sharedDistanceMemory[i]);
+	// 	}
+	// 	// printf("\n");
+	// }
+
+
+    __syncthreads();
+
+	// do reduction in shared memory
+	// for (int s = 0; s < blockDim.x; s += k) {
+	for (int s = blockDim.x/2; s > 0; s >>= 1) { // TODO what happens when k > blockDim?
+		if (threadIdx.x < s && threadIdx.x % k == 0) {
+			int leftIndex = threadIdx.x; // TODO is private needed?
+			// int leftEndingIndex = threadIdx.x + k;
+			int rightIndex = threadIdx.x + s + (s % k); // TODO bug is here
+			printf("s: %d, leftIndex: %d, rightIndex: %d\n", s, leftIndex, rightIndex);
+			float result[5]; // TODO k
+			int resultClasses[5]; // TODO k
+			// float *result;
+			// cudaMalloc(&result, k * sizeof(float));
+
+
+			// smallestKMerge(result, sharedDistanceMemory, leftStartingIndex, leftEndingIndex, leftStartingIndex + s, leftEndingIndex + s, k);
+			for (int i = 0; i < k; i++) {// TOOD add out of bounds check?
+				if (sharedDistanceMemory[leftIndex] <= sharedDistanceMemory[rightIndex]) {
+					result[i] = sharedDistanceMemory[leftIndex];
+					resultClasses[i] = sharedClassMemory[leftIndex];
+					leftIndex++;
+				} else {
+					result[i] = sharedDistanceMemory[rightIndex];
+					resultClasses[i] = sharedClassMemory[leftIndex];
+					rightIndex++;
+				}
+			}
+
+			for (int i = 0; i < k; i++) {
+				sharedDistanceMemory[threadIdx.x + i] = result[i];
+				sharedClassMemory[threadIdx.x + i] = resultClasses[i];
+			}
+		}
+
+		__syncthreads();
+	}
+
+	if (tid == 0) {
+		// printf("\n post block 1 shared mem. k = %d:\n", k);
+		for (int i = 0; i < 128; i++) {
+			printf("%f, ", sharedDistanceMemory[i]);
+		}
+		// printf("\n");
+	}
+
+	// write result for this block to global memory
+	// if (threadIdx.x == 0) {
+	// 	for (int i = 0; i < k; i++) {
+	// 		atomicMin(result[i], sharedDistanceMemory[i]); // dont I need an atomic merge?
+	// 	}
+	// }
+
+    // for (int s = blockDim.x/2; s > 0; s >>= 1) {
+	// 	if (threadIdx.x < s)
+	// 		sharedDistanceMemory[threadIdx.x] += sharedDistanceMemory[threadIdx.x + s];
+
+	// 	__syncthreads();
+	// }
+
+    // // write result for this block to global memory
+    // if (threadIdx.x == 0)
+    //     atomicAdd(result, sharedDistanceMemory[0]);  // TODO how to map class to this..... and how to custom atomic merge, just a critical section that uses all blocks? how to accss all blocks?
+}
+
 
 void hostFindKNN(float *h_distanceMatrix, float *h_datasetArray, int *h_predictions, int width, int numberOfAttributes, int k) { // h_distanceMatrix is a square matrix
 	for (int i = 0; i < width; i++) {
@@ -187,7 +324,7 @@ int main(int argc, char* argv[])
 	ArffData *dataset = parser.parse();
 	int k = atoi(argv[2]);
 	if (k > dataset->num_instances())
-	k = dataset->num_instances();
+		k = dataset->num_instances();
 	
 	int datasetMatrixLength = dataset->num_instances();// TODO are tehse needed?
 	int datasetMatrixWidth = dataset->num_attributes();
@@ -237,6 +374,80 @@ int main(int argc, char* argv[])
 
 	fillDistanceMatrix<<<gridSize, blockSize>>>(d_datasetArray, d_distanceMatrix, dataset->num_instances(), dataset->num_attributes());
 
+
+
+
+
+
+	// TODO avoid this copy if possible
+	cudaMemcpy(h_distanceMatrix, d_distanceMatrix, dataset->num_instances() * dataset->num_instances() * sizeof(int), cudaMemcpyDeviceToHost);
+
+	printf("\nh_distanceMatrix:\n");
+	for (int i = 0; i < dataset->num_instances(); i++) {
+		for (int j = 0; j < dataset->num_instances(); j++) {
+			printf("%f, ", h_distanceMatrix[i*dataset->num_instances() + j]);
+		}
+		printf("\n");
+	}
+
+	int *h_actualClasses = (int *)malloc(dataset->num_instances() * sizeof(int));
+	for (int i = 0; i < dataset->num_instances(); i++) {
+		h_actualClasses[i] = dataset->get_instance(i)->get(dataset->num_attributes() - 1)->operator int32();
+	}
+
+	int *d_actualClasses;
+	cudaMalloc(&d_actualClasses, dataset->num_instances() * sizeof(int));
+
+	cudaMemcpy(d_actualClasses, h_actualClasses, dataset->num_instances() * sizeof(int), cudaMemcpyHostToDevice);
+
+	// float **d_smallestK;
+	float *d_smallestK;
+	cudaMalloc(&d_smallestK, k * sizeof(float));
+	//	TODO openMP for loop
+	for (int i = 0; i < 1; i++) { // dataset->num_instances()
+		float *h_distanceRow = (float *)malloc(dataset->num_instances() * sizeof(float));
+		//	TODO openMP for loop
+
+		printf("\nh_distanceRow:\n");
+		for (int j = 0; j < dataset->num_instances(); j++) {
+			h_distanceRow[j] = h_distanceMatrix[i*dataset->num_instances() + j];
+			printf("%f, ", h_distanceRow[j]);
+		}
+		printf("\n");
+
+		float *d_distanceRow;
+		cudaMalloc(&d_distanceRow, dataset->num_instances() * sizeof(float));
+		// for (int j = 0; j < dataset->num_instances(); j++) {
+		// 	d_distanceRow[j] = d_distanceMatrix[i*dataset->num_instances() + j];
+		// }
+
+		cudaMemcpy(d_distanceRow, h_distanceRow, dataset->num_instances() * sizeof(float), cudaMemcpyHostToDevice);
+
+		// for (int j = 0; j < k; j++) {
+		// 	deviceFindMinKNonOptimized<<<gridSize, blockSize>>>(d_smallestK[j], d_distanceRow, d_actualClasses, dataset->num_instances(), k);
+		// }
+		deviceFindMinK<<<gridSize, blockSize>>>(d_smallestK, d_distanceRow, d_actualClasses, dataset->num_instances(), k);
+
+
+		float *h_smallestK = (float *)malloc(k * sizeof(float));
+		cudaMemcpy(h_smallestK, d_smallestK, dataset->num_instances() * sizeof(float), cudaMemcpyDeviceToHost);
+
+		printf("\n smallest distances:\n");
+		for (int j = 0; j < k; j++) {
+			printf("j: %d, distance: %f, class: %d\n", j, h_smallestK[j], 0);
+		}
+
+		cudaFree(d_distanceRow);
+	}
+
+	cudaFree(d_smallestK);
+	cudaFree(d_actualClasses);
+	free(h_actualClasses);
+
+
+
+
+
 	// knn(dataset, k, d_datasetArray, d_predictions);
 
 	// matrixMul<<<gridSize, blockSize>>>(d_datasetArray, d_distanceMatrix, d_predictions, matrixSize);
@@ -246,7 +457,6 @@ int main(int argc, char* argv[])
 	cudaEventElapsedTime(&milliseconds, start, stop);
 	printf("GPU time to fill Distance Matrix %f ms\n", milliseconds);
 
-	cudaMemcpy(h_distanceMatrix, d_distanceMatrix, dataset->num_instances() * dataset->num_instances() * sizeof(int), cudaMemcpyDeviceToHost);
 	
 	hostFindKNN(h_distanceMatrix, h_datasetArray, h_predictions, dataset->num_instances(), dataset->num_attributes(), k);
 
@@ -260,8 +470,6 @@ int main(int argc, char* argv[])
 	}
 
 	cudaEventRecord(start);
-
-	// matrixMulTiled<<<gridSize, blockSize>>>(d_datasetArray, d_distanceMatrix, d_predictions, matrixSize);
 
 	// Compute the confusion matrix
 	int* confusionMatrix = computeConfusionMatrix(h_predictions, dataset);
