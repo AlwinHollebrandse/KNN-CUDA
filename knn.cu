@@ -180,7 +180,7 @@ __global__ void deviceFindMinKNonOptimized(float *d_smallestK, float *d_distance
 
     // write result for this block to global memory
     // if (threadIdx.x == 0)
-    //     atomicAdd(d_smallestK, sharedDistanceMemory[0]); // TODO how to map class to this..... but also need to set the min to a max value now...
+	//     atomicAdd(d_smallestK, sharedDistanceMemory[0]); // TODO how to map class to this..... but also need to set the min to a max value now...
 }
 
 // Uses a shared memory reduction approach to find the smallest k values
@@ -191,7 +191,7 @@ __global__ void deviceFindMinK(float *smallestK, float *d_distanceMatrix, int *d
 
     int tid = blockIdx.x*blockDim.x + threadIdx.x; // block is threadAmount * threadAmount (16,16)
 
-	sharedDistanceMemory[threadIdx.x] = (tid < width) ? d_distanceMatrix[tid] : FLT_MAX;
+	sharedDistanceMemory[threadIdx.x] = (tid < width) ? d_distanceMatrix[tid] : FLT_MAX; // TODO dont these just keep overwiriting the first 16?, not accessing TID
 	sharedClassMemory[threadIdx.x] = (tid < width) ? d_actualClasses[tid] : -1;
 
 	// printf("tid: %d, block: %d, threadIdx.x: %d, sharedDistanceMemory[threadIdx.x]: %f, sharedClassMemory[threadIdx.x]: %d\n", tid, blockIdx.x*blockDim.x, threadIdx.x, sharedDistanceMemory[threadIdx.x], sharedClassMemory[threadIdx.x]);
@@ -209,28 +209,30 @@ __global__ void deviceFindMinK(float *smallestK, float *d_distanceMatrix, int *d
 
 	// do reduction in shared memory
 	// for (int s = 0; s < blockDim.x; s += k) {
-	for (int s = blockDim.x/2; s > 0; s >>= 1) { // TODO what happens when k > blockDim?
+	// ((ceiling division of blockDim.x / k) / 2) is number of "chunks" of size k that barely spill over the halfway point
+	// mulitply it by k to get the actual max s value to start at
+	int prevS = blockDim.x; // TODO works at max k?
+	printf("\nstarting S:%d\n", (((blockDim.x + k - 1) / k) / 2) * k); // TODO does not rpint for some reason
+	for (int s = (((blockDim.x + k - 1) / k) / 2) * k; s < prevS; s = (((s / k) + 2 - 1) / 2) * k) { // TODO what happens when k > blockDim?
 		if (threadIdx.x < s && threadIdx.x % k == 0) {
-			int leftIndex = threadIdx.x; // TODO is private needed?
-			// int leftEndingIndex = threadIdx.x + k;
-			int rightIndex = threadIdx.x + s + (s % k); // TODO bug is here
+			int leftIndex = threadIdx.x;
+			int rightIndex = threadIdx.x + s;
 			printf("s: %d, leftIndex: %d, rightIndex: %d\n", s, leftIndex, rightIndex);
-			float result[5]; // TODO k
-			int resultClasses[5]; // TODO k
+			float result[5]; // TODO k malloc
+			int resultClasses[5]; // TODO k malloc
 			// float *result;
 			// cudaMalloc(&result, k * sizeof(float));
 
-
 			// smallestKMerge(result, sharedDistanceMemory, leftStartingIndex, leftEndingIndex, leftStartingIndex + s, leftEndingIndex + s, k);
-			for (int i = 0; i < k; i++) {// TOOD add out of bounds check?
-				if (sharedDistanceMemory[leftIndex] <= sharedDistanceMemory[rightIndex]) {
-					result[i] = sharedDistanceMemory[leftIndex];
-					resultClasses[i] = sharedClassMemory[leftIndex];
-					leftIndex++;
-				} else {
+			for (int i = 0; i < k; i++) {
+				if (rightIndex < blockDim.x && sharedDistanceMemory[rightIndex] < sharedDistanceMemory[leftIndex]) {
 					result[i] = sharedDistanceMemory[rightIndex];
 					resultClasses[i] = sharedClassMemory[leftIndex];
 					rightIndex++;
+				} else {
+					result[i] = sharedDistanceMemory[leftIndex];
+					resultClasses[i] = sharedClassMemory[leftIndex];
+					leftIndex++;
 				}
 			}
 
@@ -238,18 +240,32 @@ __global__ void deviceFindMinK(float *smallestK, float *d_distanceMatrix, int *d
 				sharedDistanceMemory[threadIdx.x + i] = result[i];
 				sharedClassMemory[threadIdx.x + i] = resultClasses[i];
 			}
+
+			if (tid == 0) {
+				// printf("\n post block 1 shared mem. k = %d:\n", k);
+				// printf("s: %d, leftIndex: %d, rightIndex: %d\n", s, leftIndex, rightIndex);
+				for (int i = 0; i < 128; i++) {
+					printf("%f, ", sharedDistanceMemory[i]);
+				}
+				// printf("\n");
+			}
 		}
 
 		__syncthreads();
+
+		// if (threadIdx.x == 0) {
+			prevS = s;
+		// }
+		// __syncthreads();
 	}
 
-	if (tid == 0) {
-		// printf("\n post block 1 shared mem. k = %d:\n", k);
-		for (int i = 0; i < 128; i++) {
-			printf("%f, ", sharedDistanceMemory[i]);
-		}
-		// printf("\n");
-	}
+	// if (tid == 0) {
+	// 	// printf("\n post block 1 shared mem. k = %d:\n", k);
+	// 	for (int i = 0; i < 128; i++) {
+	// 		printf("%f, ", sharedDistanceMemory[i]);
+	// 	}
+	// 	// printf("\n");
+	// }
 
 	// write result for this block to global memory
 	// if (threadIdx.x == 0) {
@@ -267,7 +283,26 @@ __global__ void deviceFindMinK(float *smallestK, float *d_distanceMatrix, int *d
 
     // // write result for this block to global memory
     // if (threadIdx.x == 0)
-    //     atomicAdd(result, sharedDistanceMemory[0]);  // TODO how to map class to this..... and how to custom atomic merge, just a critical section that uses all blocks? how to accss all blocks?
+	//     atomicAdd(result, sharedDistanceMemory[0]);  // TODO how to map class to this..... and how to custom atomic merge, just a critical section that uses all blocks? how to accss all blocks?
+	// *mutex should be 0 before calling this function
+
+
+	// __global__ void kernelFunction(..., unsigned long long* mutex) 
+	// {
+	//     bool isSet = false; 
+	//     do 
+	//     {
+	//         if (isSet = atomicCAS(mutex, 0, 1) == 0) 
+	//         {
+	//             // critical section goes here
+	//         }
+	//         if (isSet) 
+	//         {
+	//             mutex = 0;
+	//         }
+	//     } 
+	//     while (!isSet);
+	// }
 }
 
 
@@ -317,7 +352,9 @@ int main(int argc, char* argv[])
 	if(argc != 3) {
         printf("Usage: ./main datasets/datasetFile.arff kValue");
         exit(0);
-    }
+	}
+	
+	printf("HERE?\n");
     
     // Open the dataset
     ArffParser parser(argv[1]);
