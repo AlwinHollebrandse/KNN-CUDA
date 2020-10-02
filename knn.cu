@@ -185,6 +185,7 @@ __global__ void deviceFindMinKNonOptimized(float *d_smallestK, float *d_distance
 
 // Uses a shared memory reduction approach to find the smallest k values
 __global__ void deviceFindMinK(float *smallestK, float *d_distanceMatrix, int *d_actualClasses, int width, int k) { // NOTE, rn im assuming a row is passed in at once
+	printf("\nin deviceFindMinK:\n");
 	__shared__ float sharedDistanceMemory[128];// or do width? my thinking was to do this as per row of the matrix, so load a whole row (TODO SCALABLE?)
 	__shared__ int sharedClassMemory[128];
 
@@ -213,8 +214,14 @@ __global__ void deviceFindMinK(float *smallestK, float *d_distanceMatrix, int *d
 	// mulitply it by k to get the actual max s value to start at
 	int prevS = blockDim.x; // TODO works at max k?
 	printf("\nstarting S:%d\n", (((blockDim.x + k - 1) / k) / 2) * k); // TODO does not rpint for some reason
-	for (int s = (((blockDim.x + k - 1) / k) / 2) * k; s < prevS; s = (((s / k) + 2 - 1) / 2) * k) { // TODO what happens when k > blockDim?
-		if (threadIdx.x < s && threadIdx.x % k == 0) {
+	printf("\nstarting S:%d\n", 2);
+
+	for (int s = (((blockDim.x + k - 1) / k) / 2) * k; s < prevS; s = (((s / k) + 2 - 1) / 2) * k) { // (ceil(blocksSizeK left / 2) * k)  TODO what happens when k > blockDim?
+		// printf("threadIdx.x: %d\n", threadIdx.x);
+		if (threadIdx.x == 1) {
+			printf("s: %d, prevS: %d, blockDim.x: %d\n", s, prevS, blockDim.x);
+		}
+		if (threadIdx.x <= s && threadIdx.x % k == 0) {
 			int leftIndex = threadIdx.x;
 			int rightIndex = threadIdx.x + s;
 			printf("s: %d, leftIndex: %d, rightIndex: %d\n", s, leftIndex, rightIndex);
