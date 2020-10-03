@@ -414,32 +414,9 @@ int main(int argc, char* argv[])
 	cudaMalloc(&d_smallestK, k * sizeof(float));
 	//	TODO openMP for loop
 	for (int i = 0; i < 1; i++) { // dataset->num_instances()
-		float *h_distanceRow = (float *)malloc(dataset->num_instances() * sizeof(float));
-		//	TODO openMP for loop
-
-		printf("\nh_distanceRow:\n");
-		for (int j = 0; j < dataset->num_instances(); j++) {
-			h_distanceRow[j] = h_distanceMatrix[i*dataset->num_instances() + j];
-			printf("%f, ", h_distanceRow[j]);
-		}
-		printf("\n");
-
-		float *d_distanceRow;
-		cudaMalloc(&d_distanceRow, dataset->num_instances() * sizeof(float));
-		// for (int j = 0; j < dataset->num_instances(); j++) {
-		// 	d_distanceRow[j] = d_distanceMatrix[i*dataset->num_instances() + j];
-		// }
-
-		cudaMemcpy(d_distanceRow, h_distanceRow, dataset->num_instances() * sizeof(float), cudaMemcpyHostToDevice);
-
-		// for (int j = 0; j < k; j++) { // TODO try to use the whole distance matrix. would avoid some mem copies. Maybe add a start and ending index for d_distanceMatrix
-		// 	deviceFindMinKNonOptimized<<<gridSize, blockSize>>>(d_smallestK[j], d_distanceRow, d_actualClasses, dataset->num_instances(), k);
-		// }
-		deviceFindMinK<<<blocksPerGrid, threadsPerBlock>>>(d_smallestK, d_distanceRow, d_actualClasses, dataset->num_instances(), k);
-		// deviceFindMinK<<<gridSize, blockSize>>>(d_smallestK, d_distanceRow, d_actualClasses, dataset->num_instances(), k);
+		deviceFindMinK<<<blocksPerGrid, threadsPerBlock>>>(d_smallestK, d_distanceMatrix, i * dataset->num_instances(), d_actualClasses, dataset->num_instances(), k);
 
 		cudaError_t cudaError = cudaGetLastError();
-
 		if(cudaError != cudaSuccess) {
 			fprintf(stderr, "post deviceFindMinK cudaGetLastError() returned %d: %s\n", cudaError, cudaGetErrorString(cudaError));
 			exit(EXIT_FAILURE);
@@ -459,8 +436,6 @@ int main(int argc, char* argv[])
 			fprintf(stderr, "post memcopy cudaGetLastError() returned %d: %s\n", cudaError, cudaGetErrorString(cudaError));
 			exit(EXIT_FAILURE);
 		}
-
-		cudaFree(d_distanceRow);
 	}
 
 	cudaFree(d_smallestK);
