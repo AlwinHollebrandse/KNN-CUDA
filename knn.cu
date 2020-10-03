@@ -185,25 +185,31 @@ __global__ void deviceFindMinKNonOptimized(float *d_smallestK, float *d_distance
 
 // Uses a shared memory reduction approach to find the smallest k values
 __global__ void deviceFindMinK(float *smallestK, float *d_distanceMatrix, int *d_actualClasses, int width, int k) { // NOTE, rn im assuming a row is passed in at once
-	printf("\nin deviceFindMinK:\n");
+	// if (threadIdx.x == 0) {
+		printf("\nin deviceFindMinK:\n");
+	// }
 	__shared__ float sharedDistanceMemory[128];// or do width? my thinking was to do this as per row of the matrix, so load a whole row (TODO SCALABLE?)
 	__shared__ int sharedClassMemory[128];
 
 
-    int tid = blockIdx.x*blockDim.x + threadIdx.x; // block is threadAmount * threadAmount (16,16)
+	int tid = blockIdx.x*blockDim.x + threadIdx.x;
+	
+	if (tid == 0) {
+		printf("HERE1\n");
+	}
 
 	sharedDistanceMemory[threadIdx.x] = (tid < width) ? d_distanceMatrix[tid] : FLT_MAX; // TODO dont these just keep overwiriting the first 16?, not accessing TID
 	sharedClassMemory[threadIdx.x] = (tid < width) ? d_actualClasses[tid] : -1;
 
 	// printf("tid: %d, block: %d, threadIdx.x: %d, sharedDistanceMemory[threadIdx.x]: %f, sharedClassMemory[threadIdx.x]: %d\n", tid, blockIdx.x*blockDim.x, threadIdx.x, sharedDistanceMemory[threadIdx.x], sharedClassMemory[threadIdx.x]);
 	
-	// if (threadIdx.x == 0) {
-	// 	// printf("\n pre block 1 shared mem. k = %d:\n", k);
-	// 	for (int i = 0; i < 128; i++) {
-	// 		printf("%f, ", sharedDistanceMemory[i]);
-	// 	}
-	// 	// printf("\n");
-	// }
+	if (tid == 0) {
+		printf("\n pre block 1 shared mem. k = %d:\n", k);
+		for (int i = 0; i < 128; i++) {
+			printf("%f, ", sharedDistanceMemory[i]);
+		}
+		printf("\n\n");
+	}
 
 
     __syncthreads();
@@ -213,13 +219,15 @@ __global__ void deviceFindMinK(float *smallestK, float *d_distanceMatrix, int *d
 	// ((ceiling division of blockDim.x / k) / 2) is number of "chunks" of size k that barely spill over the halfway point
 	// mulitply it by k to get the actual max s value to start at
 	int prevS = blockDim.x; // TODO works at max k?
-	printf("\nstarting S:%d\n", (((blockDim.x + k - 1) / k) / 2) * k); // TODO does not rpint for some reason
-	printf("\nstarting S:%d\n", 2);
+	if (tid == 0) {
+		printf("\nstarting S:%d, startingPrevS: %d\n", (((blockDim.x + k - 1) / k) / 2) * k, prevS); // TODO does not rpint for some reason
+	}
 
 	for (int s = (((blockDim.x + k - 1) / k) / 2) * k; s < prevS; s = (((s / k) + 2 - 1) / 2) * k) { // (ceil(blocksSizeK left / 2) * k)  TODO what happens when k > blockDim?
 		// printf("threadIdx.x: %d\n", threadIdx.x);
-		if (threadIdx.x == 1) {
-			printf("s: %d, prevS: %d, blockDim.x: %d\n", s, prevS, blockDim.x);
+		if (tid == 0) {
+			printf("startingS: %d, currentS: %d, prevS: %d, blockDim.x: %d\n", (((blockDim.x + k - 1) / k) / 2) * k, s, prevS, blockDim.x);
+			printf("blockIdx.x: %d, threadIdx.x: %d\n", blockIdx.x, threadIdx.x);
 		}
 		if (threadIdx.x <= s && threadIdx.x % k == 0) {
 			int leftIndex = threadIdx.x;
@@ -261,6 +269,7 @@ __global__ void deviceFindMinK(float *smallestK, float *d_distanceMatrix, int *d
 		__syncthreads();
 
 		// if (threadIdx.x == 0) {
+			// printf("changing prevS!\n");
 			prevS = s;
 		// }
 		// __syncthreads();
@@ -410,7 +419,7 @@ int main(int argc, char* argv[])
 
 	// this is all for the distance matrix
 	dim3 blockSize(threadsPerBlockDim, threadsPerBlockDim);
-	dim3 gridSize (gridDimSize, gridDimSize);
+	dim3 gridSize(gridDimSize, gridDimSize);
 
 	printf("CUDA kernel launch with %dx%d blocks of %dx%d threads\n", gridDimSize, gridDimSize, threadsPerBlockDim, threadsPerBlockDim);
 	
@@ -422,6 +431,15 @@ int main(int argc, char* argv[])
 
 
 
+	// this is all for the matrix reduction TODO delete?
+	int threadsPerBlock = 256;
+	int blocksPerGrid = (dataset->num_instances() + threadsPerBlock - 1) / threadsPerBlock;
+	printf("threadsPerBlock: %d, blocksPerGrid: %d, blockSize: %d, gridSize: %d\n", threadsPerBlock, blocksPerGrid, blockSize, gridSize);
+	printf("blockSize: %d, gridSize: %d, threadsPerBlock: %d, blocksPerGrid: %d\n", blockSize, gridSize, threadsPerBlock, blocksPerGrid);
+
+
+	// dim3 blockSize(threadsPerBlockDim, threadsPerBlockDim);
+	// dim3 gridSize(gridDimSize, gridDimSize);
 
 	// TODO avoid this copy if possible
 	cudaMemcpy(h_distanceMatrix, d_distanceMatrix, dataset->num_instances() * dataset->num_instances() * sizeof(int), cudaMemcpyDeviceToHost);
@@ -470,15 +488,29 @@ int main(int argc, char* argv[])
 		// for (int j = 0; j < k; j++) {
 		// 	deviceFindMinKNonOptimized<<<gridSize, blockSize>>>(d_smallestK[j], d_distanceRow, d_actualClasses, dataset->num_instances(), k);
 		// }
-		deviceFindMinK<<<gridSize, blockSize>>>(d_smallestK, d_distanceRow, d_actualClasses, dataset->num_instances(), k);
+		deviceFindMinK<<<blocksPerGrid, threadsPerBlock>>>(d_smallestK, d_distanceRow, d_actualClasses, dataset->num_instances(), k);
+		// deviceFindMinK<<<gridSize, blockSize>>>(d_smallestK, d_distanceRow, d_actualClasses, dataset->num_instances(), k);
 
+		cudaError_t cudaError = cudaGetLastError();
+
+		if(cudaError != cudaSuccess) {
+			fprintf(stderr, "post deviceFindMinK cudaGetLastError() returned %d: %s\n", cudaError, cudaGetErrorString(cudaError));
+			exit(EXIT_FAILURE);
+		}
 
 		float *h_smallestK = (float *)malloc(k * sizeof(float));
-		cudaMemcpy(h_smallestK, d_smallestK, dataset->num_instances() * sizeof(float), cudaMemcpyDeviceToHost);
+		cudaMemcpy(h_smallestK, d_smallestK, k * sizeof(float), cudaMemcpyDeviceToHost);
 
 		printf("\n smallest distances:\n");
 		for (int j = 0; j < k; j++) {
 			printf("j: %d, distance: %f, class: %d\n", j, h_smallestK[j], 0);
+		}
+
+		cudaError = cudaGetLastError();
+
+		if(cudaError != cudaSuccess) {
+			fprintf(stderr, "post memcopy cudaGetLastError() returned %d: %s\n", cudaError, cudaGetErrorString(cudaError));
+			exit(EXIT_FAILURE);
 		}
 
 		cudaFree(d_distanceRow);
