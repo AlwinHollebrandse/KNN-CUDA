@@ -108,18 +108,17 @@ void kthSmallest(std::vector<DistanceAndClass*> distanceAndClassVector, int k, f
 }
 
 // Uses a shared memory reduction approach to find the smallest k values
-__global__ void deviceFindMinK(float *smallestK, float *d_distanceMatrix, int *d_actualClasses, int width, int k) { // NOTE, rn im assuming a row is passed in at once
+__global__ void deviceFindMinK(float *smallestK, float *d_distanceMatrix, int startingDistanceIndex, int *d_actualClasses, int numInstances, int k) { // NOTE, rn im assuming a row is passed in at once
 	if (threadIdx.x == 0) {
 		printf("\nin deviceFindMinK:\n");
 	}
-	__shared__ float sharedDistanceMemory[128];// or do width? my thinking was to do this as per row of the matrix, so load a whole row (TODO SCALABLE?)
+	__shared__ float sharedDistanceMemory[128];// or do numInstances? my thinking was to do this as per row of the matrix, so load a whole row (TODO SCALABLE?)
 	__shared__ int sharedClassMemory[128];
-
 
 	int tid = blockIdx.x*blockDim.x + threadIdx.x;
 
-	sharedDistanceMemory[threadIdx.x] = (tid < width) ? d_distanceMatrix[tid] : FLT_MAX;
-	sharedClassMemory[threadIdx.x] = (tid < width) ? d_actualClasses[tid] : -1;
+	sharedDistanceMemory[threadIdx.x] = (tid < numInstances) ? d_distanceMatrix[startingDistanceIndex + tid] : FLT_MAX; // NOTE startingDistanceIndex is used to accesss the proper "row" of the matrix
+	sharedClassMemory[threadIdx.x] = (tid < numInstances) ? d_actualClasses[tid] : -1;
 	
 	if (tid == 0) {
 		printf("\n pre shared mem. k = %d:\n", k);
@@ -143,7 +142,6 @@ __global__ void deviceFindMinK(float *smallestK, float *d_distanceMatrix, int *d
 	int prevS = blockDim.x; // TODO works at max k?
 
 	for (int s = (((blockDim.x + k - 1) / k) / 2) * k; s < prevS; s = (((s / k) + 2 - 1) / 2) * k) { // (ceil(blocksSizeK left / 2) * k)  TODO what happens when k > blockDim?
-		// printf("threadIdx.x: %d\n", threadIdx.x);
 		if (tid == 0) {
 			printf("startingS: %d, currentS: %d, prevS: %d, blockDim.x: %d\n", (((blockDim.x + k - 1) / k) / 2) * k, s, prevS, blockDim.x);
 		}
@@ -151,11 +149,8 @@ __global__ void deviceFindMinK(float *smallestK, float *d_distanceMatrix, int *d
 			int leftIndex = threadIdx.x;
 			int rightIndex = threadIdx.x + s;
 			printf("s: %d, leftIndex: %d, rightIndex: %d\n", s, leftIndex, rightIndex);
-			float result[5]; // TODO k malloc
-			int resultClasses[5]; // TODO k malloc
-
-			// float *result;
-			// cudaMalloc(&result, k * sizeof(float));
+			float* result = new float[k]; // TODO does something need to be freed?
+			int* resultClasses = new int[k]; // TODO does something need to be freed?
 
 			// if on first iteration
 			if (prevS == blockDim.x) {
@@ -166,7 +161,6 @@ __global__ void deviceFindMinK(float *smallestK, float *d_distanceMatrix, int *d
 				thrust::sort_by_key(thrust::seq, sharedDistanceMemory + rightIndex, sharedDistanceMemory + actualEndingIndex, sharedClassMemory + rightIndex); // TODO 128 is not /5 so theres excess
 			}
 
-			// smallestKMerge(result, sharedDistanceMemory, leftStartingIndex, leftEndingIndex, leftStartingIndex + s, leftEndingIndex + s, k);
 			for (int i = 0; i < k; i++) {
 				if (rightIndex < blockDim.x && sharedDistanceMemory[rightIndex] < sharedDistanceMemory[leftIndex]) {
 					result[i] = sharedDistanceMemory[rightIndex];
@@ -205,12 +199,15 @@ __global__ void deviceFindMinK(float *smallestK, float *d_distanceMatrix, int *d
 
 		if (tid == 0) {
 			printf("\nchanging prevS! %d\n", prevS);
-		}
 
-		if (tid == 0) {
 			printf("\n post shared mem. k = %d:\n", k);
 			for (int i = 0; i < 128; i++) {
 				printf("%f, ", sharedDistanceMemory[i]);
+			}
+			printf("\n\n");
+			printf("\n post shared class mem. k = %d:\n", k);
+			for (int i = 0; i < 128; i++) {
+				printf("%f, ", sharedClassMemory[i]);
 			}
 			printf("\n\n");
 		}
@@ -399,8 +396,9 @@ int main(int argc, char* argv[])
 
 	printf("actual classes host:\n");
 	int *h_actualClasses = (int *)malloc(dataset->num_instances() * sizeof(int));
+	// cudaMallocHost(&h_actualClasses, dataset->num_instances() * sizeof(int));
 	for (int i = 0; i < dataset->num_instances(); i++) {
-		h_actualClasses[i] = dataset->get_instance(i)->get(dataset->num_attributes() - 1)->operator int32();
+		h_actualClasses[i] = (int)(dataset->get_instance(i)->get(dataset->num_attributes() - 1)->operator float());
 	}
 	for (int i = 0; i < dataset->num_instances(); i++) {
 		printf("%d, ", h_actualClasses[i]);
