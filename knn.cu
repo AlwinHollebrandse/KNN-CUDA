@@ -14,37 +14,6 @@
 #include "libarff/arff_parser.h"
 #include "libarff/arff_data.h"
 
-#define TILE_WIDTH 16
-
-// TODO not needed?
-__global__ void fillDistanceMatrixTiled(float *A, float *B, float *C, int width) {
-    int column = ( blockDim.x * blockIdx.x ) + threadIdx.x;
-	int row    = ( blockDim.y * blockIdx.y ) + threadIdx.y;
-	
-    float sum = 0;
-
-    // Loop over the A and B tiles required to compute the submatrix
-    for (int t = 0; t < width/TILE_WIDTH; t++)
-    {
-        __shared__ float sub_A[TILE_WIDTH][TILE_WIDTH];
-        __shared__ float sub_B[TILE_WIDTH][TILE_WIDTH];
-        
-        // Coolaborative loading of A and B tiles into shared memory
-        sub_A[threadIdx.y][threadIdx.x] = A[row*width + (t*TILE_WIDTH + threadIdx.x)];
-        sub_B[threadIdx.y][threadIdx.x] = B[column + (t*TILE_WIDTH + threadIdx.y)*width];
-        
-        __syncthreads();
-    
-        // Loop within shared memory
-        for (int k = 0; k < TILE_WIDTH; k++)
-          sum += sub_A[threadIdx.y][k] * sub_B[k][threadIdx.x];
-      
-        __syncthreads();
-    }
-    
-    C[row*width + column] = sum;
-}
-
 __global__ void fillDistanceMatrix(float *d_datasetArray, float *d_distanceMatrix, int width, int numberOfAttributes) { // d_distanceMatrix is a square matrix
 	int column = ( blockDim.x * blockIdx.x ) + threadIdx.x; // TODO which is outer and inner?
 	int row    = ( blockDim.y * blockIdx.y ) + threadIdx.y;
@@ -138,55 +107,6 @@ void kthSmallest(std::vector<DistanceAndClass*> distanceAndClassVector, int k, f
 	// printf("final: shortestKDistances[0]: %f, shortestKDistances[1]: %f\n", shortestKDistances[0], shortestKDistances[1]);
 }
 
-// void* smallestKMerge(float *result, float *distanceArr, int leftStartingIndex, int leftEndingIndex, int rightStartingIndex, int rightEndingIndex, int k) { // TODO include class array
-// 	int leftIndex = leftStartingIndex;
-// 	int rightIndex = rightStartingIndex;
-	
-// 	for (int i = 0; i < k; i++) {
-// 		if (distanceArr[leftIndex] < distanceArr[rightIndex]) {
-// 			result[i] = distanceArr[leftIndex];
-// 			leftIndex++;
-// 		} else {
-// 			result[i] = distanceArr[rightIndex];
-// 			rightIndex++;
-// 		}
-// 	}
-// }
-
-// Uses a shared memory reduction approach to find the smallest k values
-__global__ void deviceFindMinKNonOptimized(float *d_smallestK, float *d_distanceMatrix, int *d_actualClasses, int width, int k) { // NOTE, rn im assuming a row is passed in at once
-
-	__shared__ float sharedDistanceMemory[128];
-	// __shared__ int sharedClassMemory[128];
-
-    int tid = blockIdx.x*blockDim.x + threadIdx.x;
-	sharedDistanceMemory[threadIdx.x] = (tid < width) ? d_distanceMatrix[tid] : FLT_MAX;
-	// sharedClassMemory[threadIdx.x] = (tid < width) ? d_actualClasses[tid] : INT_MAX;
-
-    __syncthreads();
-
-    for (int s = blockDim.x/2; s > 0; s >>= 1) {
-		if (threadIdx.x < s) {
-			float minDistance = sharedDistanceMemory[threadIdx.x];
-			// int minClass = sharedClassMemory[threadIdx.x];
-
-			if (sharedDistanceMemory[threadIdx.x + s] < minDistance) {
-				minDistance = sharedDistanceMemory[threadIdx.x + s];
-				// minClass = sharedClassMemory[threadIdx.x + s];
-			}
-
-			sharedDistanceMemory[threadIdx.x] = minDistance; 
-			// sharedClassMemory[threadIdx.x] = minClass; 
-		}
-
-		__syncthreads();
-	}
-
-    // write result for this block to global memory
-    // if (threadIdx.x == 0)
-	//     atomicAdd(d_smallestK, sharedDistanceMemory[0]); // TODO how to map class to this..... but also need to set the min to a max value now...
-}
-
 // Uses a shared memory reduction approach to find the smallest k values
 __global__ void deviceFindMinK(float *smallestK, float *d_distanceMatrix, int *d_actualClasses, int width, int k) { // NOTE, rn im assuming a row is passed in at once
 	if (threadIdx.x == 0) {
@@ -259,30 +179,7 @@ __global__ void deviceFindMinK(float *smallestK, float *d_distanceMatrix, int *d
 				}
 			}
 
-			// for (int i = 0; i < k; i++) {
-			// 	idx[i] = i;
-			// 	printf("%d, ", idx[i]);
-			// }
-
-			// thrust::sort_by_key(thrust::seq, idx, idx + k, result);
-			// // initialize original index locations
-			// std::vector<int> idx(k);
-			// std::iota(idx.begin(), idx.end(), 0);
-
-			// // sort indexes based on comparing values in v
-			// // using std::stable_sort instead of std::sort
-			// // to avoid unnecessary index re-orderings
-			// // when v contains elements of equal values 
-			// std::stable_sort(idx.begin(), idx.end(),
-			// 	[&](int i1, int i2) {return result[i1] < result[i2];});
-
 			if (tid == 0) {
-				// printf("\n internal idx[i]:\n");
-				// for (int i = 0; i < k; i++) {
-				// 	printf("%f, ", idx[i]);
-				// }
-				// printf("\n\n");
-
 				printf("\n internal result[i]:\n");
 				for (int i = 0; i < k; i++) {
 					printf("%f, ", result[i]);
@@ -320,13 +217,18 @@ __global__ void deviceFindMinK(float *smallestK, float *d_distanceMatrix, int *d
 		__syncthreads();
 	}
 
-	// if (tid == 0) {
-	// 	// printf("\n post block 1 shared mem. k = %d:\n", k);
-	// 	for (int i = 0; i < 128; i++) {
-	// 		printf("%f, ", sharedDistanceMemory[i]);
-	// 	}
-	// 	// printf("\n");
-	// }
+	if (tid == 0) {
+		printf("\n block final smallest k:\n");
+		for (int i = 0; i < k; i++) {
+			printf("%f, ", sharedDistanceMemory[i]);
+		}
+		printf("\n\n");
+		printf("\n block final classes of smallest k:\n");
+		for (int i = 0; i < k; i++) {
+			printf("%f, ", sharedClassMemory[i]);
+		}
+		printf("\n");
+	}
 
 	// write result for this block to global memory
 	// if (threadIdx.x == 0) {
@@ -499,6 +401,8 @@ int main(int argc, char* argv[])
 	int *h_actualClasses = (int *)malloc(dataset->num_instances() * sizeof(int));
 	for (int i = 0; i < dataset->num_instances(); i++) {
 		h_actualClasses[i] = dataset->get_instance(i)->get(dataset->num_attributes() - 1)->operator int32();
+	}
+	for (int i = 0; i < dataset->num_instances(); i++) {
 		printf("%d, ", h_actualClasses[i]);
 	}
 
@@ -530,7 +434,7 @@ int main(int argc, char* argv[])
 
 		cudaMemcpy(d_distanceRow, h_distanceRow, dataset->num_instances() * sizeof(float), cudaMemcpyHostToDevice);
 
-		// for (int j = 0; j < k; j++) {
+		// for (int j = 0; j < k; j++) { // TODO try to use the whole distance matrix. would avoid some mem copies. Maybe add a start and ending index for d_distanceMatrix
 		// 	deviceFindMinKNonOptimized<<<gridSize, blockSize>>>(d_smallestK[j], d_distanceRow, d_actualClasses, dataset->num_instances(), k);
 		// }
 		deviceFindMinK<<<blocksPerGrid, threadsPerBlock>>>(d_smallestK, d_distanceRow, d_actualClasses, dataset->num_instances(), k);
