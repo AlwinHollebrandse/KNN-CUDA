@@ -6,7 +6,11 @@
 #include <map>
 #include <climits> 
 #include <cfloat>
-#include <algorithm> // for heap  
+#include <vector>
+#include <algorithm> // for heap
+#include <numeric> // std::iota
+#include <thrust/sort.h>
+#include <thrust/execution_policy.h>
 #include "libarff/arff_parser.h"
 #include "libarff/arff_data.h"
 
@@ -185,32 +189,30 @@ __global__ void deviceFindMinKNonOptimized(float *d_smallestK, float *d_distance
 
 // Uses a shared memory reduction approach to find the smallest k values
 __global__ void deviceFindMinK(float *smallestK, float *d_distanceMatrix, int *d_actualClasses, int width, int k) { // NOTE, rn im assuming a row is passed in at once
-	// if (threadIdx.x == 0) {
+	if (threadIdx.x == 0) {
 		printf("\nin deviceFindMinK:\n");
-	// }
+	}
 	__shared__ float sharedDistanceMemory[128];// or do width? my thinking was to do this as per row of the matrix, so load a whole row (TODO SCALABLE?)
 	__shared__ int sharedClassMemory[128];
 
 
 	int tid = blockIdx.x*blockDim.x + threadIdx.x;
-	
-	if (tid == 0) {
-		printf("HERE1\n");
-	}
 
-	sharedDistanceMemory[threadIdx.x] = (tid < width) ? d_distanceMatrix[tid] : FLT_MAX; // TODO dont these just keep overwiriting the first 16?, not accessing TID
+	sharedDistanceMemory[threadIdx.x] = (tid < width) ? d_distanceMatrix[tid] : FLT_MAX;
 	sharedClassMemory[threadIdx.x] = (tid < width) ? d_actualClasses[tid] : -1;
-
-	// printf("tid: %d, block: %d, threadIdx.x: %d, sharedDistanceMemory[threadIdx.x]: %f, sharedClassMemory[threadIdx.x]: %d\n", tid, blockIdx.x*blockDim.x, threadIdx.x, sharedDistanceMemory[threadIdx.x], sharedClassMemory[threadIdx.x]);
 	
 	if (tid == 0) {
-		printf("\n pre block 1 shared mem. k = %d:\n", k);
+		printf("\n pre shared mem. k = %d:\n", k);
 		for (int i = 0; i < 128; i++) {
 			printf("%f, ", sharedDistanceMemory[i]);
 		}
+		
+		printf("\n pre shared class mem. k = %d:\n", k); // TODO why are these all FLT_MAX?????
+		for (int i = 0; i < 128; i++) {
+			printf("%f, ", sharedClassMemory[i]);
+		}
 		printf("\n\n");
 	}
-
 
     __syncthreads();
 
@@ -219,30 +221,36 @@ __global__ void deviceFindMinK(float *smallestK, float *d_distanceMatrix, int *d
 	// ((ceiling division of blockDim.x / k) / 2) is number of "chunks" of size k that barely spill over the halfway point
 	// mulitply it by k to get the actual max s value to start at
 	int prevS = blockDim.x; // TODO works at max k?
-	if (tid == 0) {
-		printf("\nstarting S:%d, startingPrevS: %d\n", (((blockDim.x + k - 1) / k) / 2) * k, prevS); // TODO does not rpint for some reason
-	}
 
 	for (int s = (((blockDim.x + k - 1) / k) / 2) * k; s < prevS; s = (((s / k) + 2 - 1) / 2) * k) { // (ceil(blocksSizeK left / 2) * k)  TODO what happens when k > blockDim?
 		// printf("threadIdx.x: %d\n", threadIdx.x);
 		if (tid == 0) {
 			printf("startingS: %d, currentS: %d, prevS: %d, blockDim.x: %d\n", (((blockDim.x + k - 1) / k) / 2) * k, s, prevS, blockDim.x);
-			printf("blockIdx.x: %d, threadIdx.x: %d\n", blockIdx.x, threadIdx.x);
 		}
-		if (threadIdx.x <= s && threadIdx.x % k == 0) {
+		if (threadIdx.x < s && threadIdx.x % k == 0) {
 			int leftIndex = threadIdx.x;
 			int rightIndex = threadIdx.x + s;
 			printf("s: %d, leftIndex: %d, rightIndex: %d\n", s, leftIndex, rightIndex);
 			float result[5]; // TODO k malloc
 			int resultClasses[5]; // TODO k malloc
+
 			// float *result;
 			// cudaMalloc(&result, k * sizeof(float));
+
+			// if on first iteration
+			if (prevS == blockDim.x) {
+				thrust::sort_by_key(thrust::seq, sharedDistanceMemory + leftIndex, sharedDistanceMemory + leftIndex + k, sharedClassMemory + leftIndex);
+				int actualEndingIndex = rightIndex + k;
+				if (actualEndingIndex >= 128)
+					actualEndingIndex = 128;
+				thrust::sort_by_key(thrust::seq, sharedDistanceMemory + rightIndex, sharedDistanceMemory + actualEndingIndex, sharedClassMemory + rightIndex); // TODO 128 is not /5 so theres excess
+			}
 
 			// smallestKMerge(result, sharedDistanceMemory, leftStartingIndex, leftEndingIndex, leftStartingIndex + s, leftEndingIndex + s, k);
 			for (int i = 0; i < k; i++) {
 				if (rightIndex < blockDim.x && sharedDistanceMemory[rightIndex] < sharedDistanceMemory[leftIndex]) {
 					result[i] = sharedDistanceMemory[rightIndex];
-					resultClasses[i] = sharedClassMemory[leftIndex];
+					resultClasses[i] = sharedClassMemory[rightIndex];
 					rightIndex++;
 				} else {
 					result[i] = sharedDistanceMemory[leftIndex];
@@ -251,28 +259,65 @@ __global__ void deviceFindMinK(float *smallestK, float *d_distanceMatrix, int *d
 				}
 			}
 
+			// for (int i = 0; i < k; i++) {
+			// 	idx[i] = i;
+			// 	printf("%d, ", idx[i]);
+			// }
+
+			// thrust::sort_by_key(thrust::seq, idx, idx + k, result);
+			// // initialize original index locations
+			// std::vector<int> idx(k);
+			// std::iota(idx.begin(), idx.end(), 0);
+
+			// // sort indexes based on comparing values in v
+			// // using std::stable_sort instead of std::sort
+			// // to avoid unnecessary index re-orderings
+			// // when v contains elements of equal values 
+			// std::stable_sort(idx.begin(), idx.end(),
+			// 	[&](int i1, int i2) {return result[i1] < result[i2];});
+
+			if (tid == 0) {
+				// printf("\n internal idx[i]:\n");
+				// for (int i = 0; i < k; i++) {
+				// 	printf("%f, ", idx[i]);
+				// }
+				// printf("\n\n");
+
+				printf("\n internal result[i]:\n");
+				for (int i = 0; i < k; i++) {
+					printf("%f, ", result[i]);
+				}
+				printf("\n\n");
+
+				printf("\n internal resultClasses[i]:\n");
+				for (int i = 0; i < k; i++) {
+					printf("%f, ", resultClasses[i]);
+				}
+				printf("\n\n");
+			}
+
 			for (int i = 0; i < k; i++) {
 				sharedDistanceMemory[threadIdx.x + i] = result[i];
 				sharedClassMemory[threadIdx.x + i] = resultClasses[i];
 			}
-
-			if (tid == 0) {
-				// printf("\n post block 1 shared mem. k = %d:\n", k);
-				// printf("s: %d, leftIndex: %d, rightIndex: %d\n", s, leftIndex, rightIndex);
-				for (int i = 0; i < 128; i++) {
-					printf("%f, ", sharedDistanceMemory[i]);
-				}
-				// printf("\n");
-			}
 		}
 
 		__syncthreads();
+		
+		prevS = s;
 
-		// if (threadIdx.x == 0) {
-			// printf("changing prevS!\n");
-			prevS = s;
-		// }
-		// __syncthreads();
+		if (tid == 0) {
+			printf("\nchanging prevS! %d\n", prevS);
+		}
+
+		if (tid == 0) {
+			printf("\n post shared mem. k = %d:\n", k);
+			for (int i = 0; i < 128; i++) {
+				printf("%f, ", sharedDistanceMemory[i]);
+			}
+			printf("\n\n");
+		}
+		__syncthreads();
 	}
 
 	// if (tid == 0) {
@@ -369,9 +414,7 @@ int main(int argc, char* argv[])
         printf("Usage: ./main datasets/datasetFile.arff kValue");
         exit(0);
 	}
-	
-	printf("HERE?\n");
-    
+	    
     // Open the dataset
     ArffParser parser(argv[1]);
 	ArffData *dataset = parser.parse();
@@ -432,7 +475,7 @@ int main(int argc, char* argv[])
 
 
 	// this is all for the matrix reduction TODO delete?
-	int threadsPerBlock = 256;
+	int threadsPerBlock = 128;
 	int blocksPerGrid = (dataset->num_instances() + threadsPerBlock - 1) / threadsPerBlock;
 	printf("threadsPerBlock: %d, blocksPerGrid: %d, blockSize: %d, gridSize: %d\n", threadsPerBlock, blocksPerGrid, blockSize, gridSize);
 	printf("blockSize: %d, gridSize: %d, threadsPerBlock: %d, blocksPerGrid: %d\n", blockSize, gridSize, threadsPerBlock, blocksPerGrid);
@@ -452,9 +495,11 @@ int main(int argc, char* argv[])
 		printf("\n");
 	}
 
+	printf("actual classes host:\n");
 	int *h_actualClasses = (int *)malloc(dataset->num_instances() * sizeof(int));
 	for (int i = 0; i < dataset->num_instances(); i++) {
 		h_actualClasses[i] = dataset->get_instance(i)->get(dataset->num_attributes() - 1)->operator int32();
+		printf("%d, ", h_actualClasses[i]);
 	}
 
 	int *d_actualClasses;
