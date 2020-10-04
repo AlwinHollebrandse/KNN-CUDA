@@ -37,28 +37,31 @@ __global__ void fillDistanceMatrix(float *d_datasetArray, float *d_distanceMatri
 }
 
 // Uses a shared memory reduction approach to find the smallest k values
-__global__ void deviceFindMinK(float *d_smallestK, int *d_smallestKClasses, float *d_distanceMatrix, int startingDistanceIndex, int yIndex, int *d_actualClasses, int numInstances, int k) {
-	if (threadIdx.x == 0) { // TODO remove startingDistanceIndex and replace yIndex with tidY replace startingDistanceIndex with tidY * numInstances
-		printf("\nin deviceFindMinK %d:\n", yIndex);
+__global__ void deviceFindMinK(float *d_smallestK, int *d_smallestKClasses, float *d_distanceMatrix, int *d_actualClasses, int numInstances, int k) {
+	__shared__ float sharedDistanceMemory[THREADSPERBLOCK * 4];
+	__shared__ int sharedClassMemory[THREADSPERBLOCK * 4];
+
+	int tid_x = blockIdx.x*blockDim.x + threadIdx.x;
+	int tid_y  = blockIdx.y*blockDim.y + threadIdx.y;
+	int startingDistanceIndex = tid_y * numInstances;
+
+	if (tid_x == 0) { // TODO remove startingDistanceIndex and replace yIndex with tidY replace startingDistanceIndex with tidY * numInstances
+		printf("\nin deviceFindMinK tid_y: %d\n", tid_y);
 	}
-	__shared__ float sharedDistanceMemory[THREADSPERBLOCK];
-	__shared__ int sharedClassMemory[THREADSPERBLOCK];
 
-	int tid = blockIdx.x*blockDim.x + threadIdx.x;
-
-	sharedDistanceMemory[threadIdx.x] = (tid < numInstances) ? d_distanceMatrix[startingDistanceIndex + tid] : FLT_MAX; // NOTE startingDistanceIndex is used to accesss the proper "row" of the matrix
-	sharedClassMemory[threadIdx.x] = (tid < numInstances) ? d_actualClasses[tid] : -1;
+	sharedDistanceMemory[THREADSPERBLOCK*tid_y + threadIdx.x] = (tid_x < numInstances) ? d_distanceMatrix[startingDistanceIndex + tid_x] : FLT_MAX; // NOTE startingDistanceIndex is used to accesss the proper "row" of the matrix
+	sharedClassMemory[THREADSPERBLOCK*tid_y + threadIdx.x] = (tid_x < numInstances) ? d_actualClasses[tid_x] : -1;
 	
 	__syncthreads();
 	
-	if (tid == 0) {
+	if (tid_x == 0 && tid_y == 0) {
 		printf("\n pre shared mem. k = %d:\n", k);
-		for (int i = 0; i < THREADSPERBLOCK; i++) {
+		for (int i = THREADSPERBLOCK*tid_y + 0; i < THREADSPERBLOCK*tid_y + THREADSPERBLOCK; i++) {
 			printf("%f, ", sharedDistanceMemory[i]);
 		}
 		
-		printf("\n pre shared class mem. k = %d:\n", k); // TODO why are these all FLT_MAX?????
-		for (int i = 0; i < THREADSPERBLOCK; i++) {
+		printf("\n pre shared class mem. k = %d:\n", k);
+		for (int i = THREADSPERBLOCK*tid_y + 0; i < THREADSPERBLOCK*tid_y + THREADSPERBLOCK; i++) {
 			printf("%d, ", sharedClassMemory[i]);
 		}
 		printf("\n\n");
@@ -74,7 +77,7 @@ __global__ void deviceFindMinK(float *d_smallestK, int *d_smallestKClasses, floa
 
 	for (int s = (((blockDim.x + k - 1) / k) / 2) * k; s < prevS; s = (((s / k) + 2 - 1) / 2) * k) { // (ceil(blocksSizeK left / 2) * k)  TODO what happens when k > blockDim?
 		if (threadIdx.x < s && threadIdx.x % k == 0) {
-			int leftIndex = threadIdx.x;
+			int leftIndex = THREADSPERBLOCK*tid_y + threadIdx.x;
 			int rightIndex = leftIndex + s;
 			// printf("s: %d, leftIndex: %d, rightIndex: %d\n", s, leftIndex, rightIndex);
 			float* result = new float[k]; // TODO does something need to be freed?
@@ -102,8 +105,8 @@ __global__ void deviceFindMinK(float *d_smallestK, int *d_smallestKClasses, floa
 			}
 
 			for (int i = 0; i < k; i++) {
-				sharedDistanceMemory[threadIdx.x + i] = result[i];
-				sharedClassMemory[threadIdx.x + i] = resultClasses[i];
+				sharedDistanceMemory[THREADSPERBLOCK*tid_y + threadIdx.x + i] = result[i];
+				sharedClassMemory[THREADSPERBLOCK*tid_y + threadIdx.x + i] = resultClasses[i];
 			}
 		}
 		
@@ -112,22 +115,22 @@ __global__ void deviceFindMinK(float *d_smallestK, int *d_smallestKClasses, floa
 		__syncthreads();
 	}
 
-	if (tid == 0) {
+	if (tid_x == 0 && tid_y == 0) {
 		printf("\n block final smallest k:\n");
-		for (int i = 0; i < k; i++) {
+		for (int i = THREADSPERBLOCK*tid_y + 0; i < THREADSPERBLOCK*tid_y + k; i++) {
 			printf("%f, ", sharedDistanceMemory[i]);
 		}
 		printf("\n\n");
 		printf("\n block final classes of smallest k:\n");
-		for (int i = 0; i < k; i++) {
+		for (int i = THREADSPERBLOCK*tid_y + 0; i < THREADSPERBLOCK*tid_y + k; i++) {
 			printf("%d, ", sharedClassMemory[i]);
 		}
 		printf("\n");
 	}
 
 	// write your nearestK to global mem
-	if (tid == 0) {
-		int startingKIndex = k * yIndex;
+	if (tid_x == 0) {
+		int startingKIndex = k * tid_y;
 		int endingKIndex = startingKIndex + k;
 		int j = 0;
 		for (int i = startingKIndex; i < endingKIndex; i++) {
@@ -144,7 +147,7 @@ __global__ void makePredicitions(int *d_predictions, float *d_smallestK, int *d_
 		printf("\nin makePredicitions %d:\n", yIndex);
 	}
 
-	int tid = blockIdx.x*blockDim.x + threadIdx.x;
+	int tid_x = blockIdx.x*blockDim.x + threadIdx.x;
 
 	int prevS = gridDim.x;//blockDim.x; // TODO works at max k?
 
@@ -178,7 +181,7 @@ __global__ void makePredicitions(int *d_predictions, float *d_smallestK, int *d_
 		__syncthreads();
 	}
 
-	if (tid == 0) {
+	if (tid_x == 0) {
 		int endingDistanceIndex = startingDistanceIndex + k;
 		printf("\n d_smallestK:\n");
 		for (int i = startingDistanceIndex; i < endingDistanceIndex; i++) {
@@ -274,7 +277,6 @@ int main(int argc, char* argv[])
 	float *h_datasetArray = (float *)malloc(numElements * sizeof(float));
 	float *h_distanceMatrix = (float *)malloc(dataset->num_instances() * dataset->num_instances() * sizeof(float)); // used to find all distances in parallel
 	int *h_predictions = (int *)malloc(dataset->num_instances() * sizeof(int));
-	int *h_predictions_CPUres = (int *)malloc(dataset->num_instances() * sizeof(int)); // TODO do I need a cpu version?
 
 	// Initialize the host input matrixs
 	for (int i = 0; i < datasetMatrixLength; ++i) {
@@ -321,23 +323,21 @@ int main(int argc, char* argv[])
 
 
 
-	// this is all for the matrix reduction TODO delete?
+	// this is all for the matrix reduction
 	int blocksPerGrid = (dataset->num_instances() + THREADSPERBLOCK - 1) / THREADSPERBLOCK;
-	printf("THREADSPERBLOCK: %d, blocksPerGrid: %d, blockSize: %d, gridSize: %d\n", THREADSPERBLOCK, blocksPerGrid, blockSize, gridSize);
-	printf("blockSize: %d, gridSize: %d, THREADSPERBLOCK: %d, blocksPerGrid: %d\n", blockSize, gridSize, THREADSPERBLOCK, blocksPerGrid);
+	dim3 reductionBlockSize(threadsPerBlockDim, 4); // 256 * 4 <= 1024
+	dim3 reductionGridSize(blocksPerGrid, blocksPerGrid); // TODOwould grid also be 2D?
+
+
+	// in addition, my kernel seems to only be getting called once and making tid_y 0-4 instead of  the 0-numInstances like I was expecting. 
 
 
 	// dim3 blockSize(threadsPerBlockDim, threadsPerBlockDim);
 	// dim3 gridSize(gridDimSize, gridDimSize);
 
-	printf("actual classes host:\n");
 	int *h_actualClasses = (int *)malloc(dataset->num_instances() * sizeof(int));
-	// cudaMallocHost(&h_actualClasses, dataset->num_instances() * sizeof(int));
 	for (int i = 0; i < dataset->num_instances(); i++) {
 		h_actualClasses[i] = dataset->get_instance(i)->get(dataset->num_attributes() - 1)->operator int32();
-	}
-	for (int i = 0; i < dataset->num_instances(); i++) {
-		printf("%d, ", h_actualClasses[i]);
 	}
 
 	int *d_actualClasses;
@@ -353,19 +353,12 @@ int main(int argc, char* argv[])
 
 	// cudadevicesynchronize(); // wait for distanceMAtrix to be filled TODO needed?
 
-	//	TODO openMP for loop
-	for (int i = 0; i < dataset->num_instances(); i++) { // dataset->num_instances() // TODO replace loop with tid_y. see slack.
-		deviceFindMinK<<<blocksPerGrid, THREADSPERBLOCK>>>(d_smallestK, d_smallestKClasses, d_distanceMatrix, i * dataset->num_instances(), i, d_actualClasses, dataset->num_instances(), k);
+	deviceFindMinK<<<blocksPerGrid, reductionBlockSize>>>(d_smallestK, d_smallestKClasses, d_distanceMatrix, d_actualClasses, dataset->num_instances(), k);
 
-		cudaError_t cudaError = cudaGetLastError();
-		if(cudaError != cudaSuccess) {
-			fprintf(stderr, "post deviceFindMinK cudaGetLastError() returned %d: %s\n", cudaError, cudaGetErrorString(cudaError));
-			exit(EXIT_FAILURE);
-		}
-		// printf("\n smallest distances:\n");
-		// for (int j = 0; j < k; j++) {
-		// 	printf("j: %d, distance: %f, class: %d\n", j, h_smallestK[j], 0);
-		// }
+	cudaError_t cudaError = cudaGetLastError();
+	if(cudaError != cudaSuccess) {
+		fprintf(stderr, "post deviceFindMinK cudaGetLastError() returned %d: %s\n", cudaError, cudaGetErrorString(cudaError));
+		exit(EXIT_FAILURE);
 	}
 
 	// cudadevicesynchronize(); // wait for smallestK's to be filled TODO needed?
@@ -401,16 +394,6 @@ int main(int argc, char* argv[])
 
 	printf("The KNN classifier for %lu instances with k=%d had an accuracy of %.4f\n", dataset->num_instances(), k, accuracy);
 
-	// // Verify that the result matrix is correct
-	// for (int i = 0; i < numElements; i++)
-	// 	if (fabs(h_predictions[i] - h_predictions_CPUres[i]) > 1e-3)
-	// 	{
-	// 		fprintf(stderr, "Result verification failed at element %d, %f vs %f!\n", i, h_predictions[i], h_predictions_CPUres[i]);
-	// 		exit(EXIT_FAILURE);
-	// 	}
-
-	// printf("Multiplication of the matrixes was OK\n");
-
 	// Free device global memory
 	cudaFree(d_datasetArray);
 	cudaFree(d_predictions);
@@ -421,7 +404,6 @@ int main(int argc, char* argv[])
 	// Free host memory
 	free(h_datasetArray);
 	free(h_predictions);
-	free(h_predictions_CPUres);
 	free(h_actualClasses);
 
 	return 0;
