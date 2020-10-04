@@ -14,6 +14,8 @@
 #include "libarff/arff_parser.h"
 #include "libarff/arff_data.h"
 
+#define THREADSPERBLOCK 256
+
 __global__ void fillDistanceMatrix(float *d_datasetArray, float *d_distanceMatrix, int width, int numberOfAttributes) { // d_distanceMatrix is a square matrix
 	int column = ( blockDim.x * blockIdx.x ) + threadIdx.x; // TODO which is outer and inner?
 	int row    = ( blockDim.y * blockIdx.y ) + threadIdx.y;
@@ -112,23 +114,25 @@ __global__ void deviceFindMinK(float *smallestK, float *d_distanceMatrix, int st
 	if (threadIdx.x == 0) {
 		printf("\nin deviceFindMinK:\n");
 	}
-	__shared__ float sharedDistanceMemory[128];// or do numInstances? my thinking was to do this as per row of the matrix, so load a whole row (TODO SCALABLE?)
-	__shared__ int sharedClassMemory[128];
+	__shared__ float sharedDistanceMemory[THREADSPERBLOCK];// or do numInstances? my thinking was to do this as per row of the matrix, so load a whole row (TODO SCALABLE?)
+	__shared__ int sharedClassMemory[THREADSPERBLOCK];
 
 	int tid = blockIdx.x*blockDim.x + threadIdx.x;
 
 	sharedDistanceMemory[threadIdx.x] = (tid < numInstances) ? d_distanceMatrix[startingDistanceIndex + tid] : FLT_MAX; // NOTE startingDistanceIndex is used to accesss the proper "row" of the matrix
 	sharedClassMemory[threadIdx.x] = (tid < numInstances) ? d_actualClasses[tid] : -1;
 	
+	__syncthreads();
+	
 	if (tid == 0) {
 		printf("\n pre shared mem. k = %d:\n", k);
-		for (int i = 0; i < 128; i++) {
+		for (int i = 0; i < THREADSPERBLOCK; i++) {
 			printf("%f, ", sharedDistanceMemory[i]);
 		}
 		
 		printf("\n pre shared class mem. k = %d:\n", k); // TODO why are these all FLT_MAX?????
-		for (int i = 0; i < 128; i++) {
-			printf("%f, ", sharedClassMemory[i]);
+		for (int i = 0; i < THREADSPERBLOCK; i++) {
+			printf("%d, ", sharedClassMemory[i]);
 		}
 		printf("\n\n");
 	}
@@ -156,9 +160,9 @@ __global__ void deviceFindMinK(float *smallestK, float *d_distanceMatrix, int st
 			if (prevS == blockDim.x) {
 				thrust::sort_by_key(thrust::seq, sharedDistanceMemory + leftIndex, sharedDistanceMemory + leftIndex + k, sharedClassMemory + leftIndex);
 				int actualEndingIndex = rightIndex + k;
-				if (actualEndingIndex >= 128)
-					actualEndingIndex = 128;
-				thrust::sort_by_key(thrust::seq, sharedDistanceMemory + rightIndex, sharedDistanceMemory + actualEndingIndex, sharedClassMemory + rightIndex); // TODO 128 is not /5 so theres excess
+				if (actualEndingIndex >= THREADSPERBLOCK)
+					actualEndingIndex = THREADSPERBLOCK;
+				thrust::sort_by_key(thrust::seq, sharedDistanceMemory + rightIndex, sharedDistanceMemory + actualEndingIndex, sharedClassMemory + rightIndex);
 			}
 
 			for (int i = 0; i < k; i++) {
@@ -182,7 +186,7 @@ __global__ void deviceFindMinK(float *smallestK, float *d_distanceMatrix, int st
 
 				printf("\n internal resultClasses[i]:\n");
 				for (int i = 0; i < k; i++) {
-					printf("%f, ", resultClasses[i]);
+					printf("%d, ", resultClasses[i]);
 				}
 				printf("\n\n");
 			}
@@ -201,13 +205,13 @@ __global__ void deviceFindMinK(float *smallestK, float *d_distanceMatrix, int st
 			printf("\nchanging prevS! %d\n", prevS);
 
 			printf("\n post shared mem. k = %d:\n", k);
-			for (int i = 0; i < 128; i++) {
+			for (int i = 0; i < THREADSPERBLOCK; i++) {
 				printf("%f, ", sharedDistanceMemory[i]);
 			}
 			printf("\n\n");
 			printf("\n post shared class mem. k = %d:\n", k);
-			for (int i = 0; i < 128; i++) {
-				printf("%f, ", sharedClassMemory[i]);
+			for (int i = 0; i < THREADSPERBLOCK; i++) {
+				printf("%d, ", sharedClassMemory[i]);
 			}
 			printf("\n\n");
 		}
@@ -222,47 +226,12 @@ __global__ void deviceFindMinK(float *smallestK, float *d_distanceMatrix, int st
 		printf("\n\n");
 		printf("\n block final classes of smallest k:\n");
 		for (int i = 0; i < k; i++) {
-			printf("%f, ", sharedClassMemory[i]);
+			printf("%d, ", sharedClassMemory[i]);
 		}
 		printf("\n");
 	}
-
-	// write result for this block to global memory
-	// if (threadIdx.x == 0) {
-	// 	for (int i = 0; i < k; i++) {
-	// 		atomicMin(result[i], sharedDistanceMemory[i]); // dont I need an atomic merge?
-	// 	}
-	// }
-
-    // for (int s = blockDim.x/2; s > 0; s >>= 1) {
-	// 	if (threadIdx.x < s)
-	// 		sharedDistanceMemory[threadIdx.x] += sharedDistanceMemory[threadIdx.x + s];
-
-	// 	__syncthreads();
-	// }
-
-    // // write result for this block to global memory
-    // if (threadIdx.x == 0)
-	//     atomicAdd(result, sharedDistanceMemory[0]);  // TODO how to map class to this..... and how to custom atomic merge, just a critical section that uses all blocks? how to accss all blocks?
-	// *mutex should be 0 before calling this function
-
-
-	// __global__ void kernelFunction(..., unsigned long long* mutex) 
-	// {
-	//     bool isSet = false; 
-	//     do 
-	//     {
-	//         if (isSet = atomicCAS(mutex, 0, 1) == 0) 
-	//         {
-	//             // critical section goes here
-	//         }
-	//         if (isSet) 
-	//         {
-	//             mutex = 0;
-	//         }
-	//     } 
-	//     while (!isSet);
-	// }
+ 
+	// TODO global mem reduce. then set prediction to that
 }
 
 
@@ -374,10 +343,9 @@ int main(int argc, char* argv[])
 
 
 	// this is all for the matrix reduction TODO delete?
-	int threadsPerBlock = 128;
-	int blocksPerGrid = (dataset->num_instances() + threadsPerBlock - 1) / threadsPerBlock;
-	printf("threadsPerBlock: %d, blocksPerGrid: %d, blockSize: %d, gridSize: %d\n", threadsPerBlock, blocksPerGrid, blockSize, gridSize);
-	printf("blockSize: %d, gridSize: %d, threadsPerBlock: %d, blocksPerGrid: %d\n", blockSize, gridSize, threadsPerBlock, blocksPerGrid);
+	int blocksPerGrid = (dataset->num_instances() + THREADSPERBLOCK - 1) / THREADSPERBLOCK;
+	printf("THREADSPERBLOCK: %d, blocksPerGrid: %d, blockSize: %d, gridSize: %d\n", THREADSPERBLOCK, blocksPerGrid, blockSize, gridSize);
+	printf("blockSize: %d, gridSize: %d, THREADSPERBLOCK: %d, blocksPerGrid: %d\n", blockSize, gridSize, THREADSPERBLOCK, blocksPerGrid);
 
 
 	// dim3 blockSize(threadsPerBlockDim, threadsPerBlockDim);
@@ -398,7 +366,7 @@ int main(int argc, char* argv[])
 	int *h_actualClasses = (int *)malloc(dataset->num_instances() * sizeof(int));
 	// cudaMallocHost(&h_actualClasses, dataset->num_instances() * sizeof(int));
 	for (int i = 0; i < dataset->num_instances(); i++) {
-		h_actualClasses[i] = (int)(dataset->get_instance(i)->get(dataset->num_attributes() - 1)->operator float());
+		h_actualClasses[i] = (int)(dataset->get_instance(i)->get(dataset->num_attributes() - 1)->operator int32());
 	}
 	for (int i = 0; i < dataset->num_instances(); i++) {
 		printf("%d, ", h_actualClasses[i]);
@@ -413,8 +381,8 @@ int main(int argc, char* argv[])
 	float *d_smallestK;
 	cudaMalloc(&d_smallestK, k * sizeof(float));
 	//	TODO openMP for loop
-	for (int i = 0; i < 1; i++) { // dataset->num_instances()
-		deviceFindMinK<<<blocksPerGrid, threadsPerBlock>>>(d_smallestK, d_distanceMatrix, i * dataset->num_instances(), d_actualClasses, dataset->num_instances(), k);
+	for (int i = 0; i < 1; i++) { // dataset->num_instances() // TODO replace loop with e tid_y. see slcak. // TODO d_predictions instead of d_smallestK
+		deviceFindMinK<<<blocksPerGrid, THREADSPERBLOCK>>>(d_smallestK, d_distanceMatrix, i * dataset->num_instances(), d_actualClasses, dataset->num_instances(), k);
 
 		cudaError_t cudaError = cudaGetLastError();
 		if(cudaError != cudaSuccess) {
