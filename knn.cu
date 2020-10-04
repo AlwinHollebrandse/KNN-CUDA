@@ -36,100 +36,6 @@ __global__ void fillDistanceMatrix(float *d_datasetArray, float *d_distanceMatri
 	}
 }
 
-struct DistanceAndClass {
-	float distance;
-	int assignedClass; // class is a reserved word
-};
-
-DistanceAndClass* newDistanceAndClass(float distance, int assignedClass) { 
-    DistanceAndClass* temp = new DistanceAndClass; 
-	temp->distance = distance; 
-	temp->assignedClass = assignedClass; 
-    return temp; 
-}
-
-struct DistanceAndClass_rank_greater_than {
-    bool operator()(DistanceAndClass* const a, DistanceAndClass* const b) const {
-        return a->distance > b->distance;
-    }
-};
-
-// Performs majority voting using the first k first elements of an array
-int kVoting(int k, float (*shortestKDistances)[2]) {
-    std::map<float, int> classCounter;
-    for (int i = 0; i < k; i++) {
-        classCounter[shortestKDistances[i][1]]++;
-    }
-
-    int voteResult = -1;
-    int numberOfVotes = -1;
-    for (auto i : classCounter) {
-        if (i.second > numberOfVotes) {
-            numberOfVotes = i.second;
-            voteResult = i.first;
-        }
-    }
-
-    return voteResult;
-}
-
-// Performs majority voting using the first k first elements of an array
-__global__ void deviceKVoting(int &prediction, int k, int *d_smallestKClasses, int startingDistanceIndex) {
-	// get max class
-	int maxClass = 0;
-	for (int i = startingDistanceIndex; i < k; i++) {
-		if (d_smallestKClasses[i] > maxClass)
-			maxClass = d_smallestKClasses[i];
-	}
-
-	int* classCounter = new int[maxClass + 1]; // TODO does something need to be freed?
-	// thrust::device_vector<int> classCounter(maxClass + 1);
-	for (int i = startingDistanceIndex; i < k; i++) {
-        classCounter[d_smallestKClasses[i]]++;
-	}
-	
-	int voteResult = -1;
-    int numberOfVotes = -1;
-    for (int i = 0; i <= maxClass; i++) {
-        if (classCounter[i] > numberOfVotes) {
-            numberOfVotes = classCounter[i];
-            voteResult = i;
-        }
-    }
-
-	
-    // std::map<int, int> classCounter; // TODO somehow use a map in device
-    // for (int i = startingDistanceIndex; i < k; i++) {
-    //     classCounter[d_smallestKClasses[i]]++;
-    // }
-
-    // int voteResult = -1;
-    // int numberOfVotes = -1;
-    // for (auto i : classCounter) {
-    //     if (i.second > numberOfVotes) {
-    //         numberOfVotes = i.second;
-    //         voteResult = i.first;
-    //     }
-    // }
-
-    prediction = voteResult;
-}
-
-// Function to return k'th smallest element in a given array 
-void kthSmallest(std::vector<DistanceAndClass*> distanceAndClassVector, int k, float (*shortestKDistances)[2]) {
-	// build a min heap
-	std::make_heap(distanceAndClassVector.begin(), distanceAndClassVector.end(), DistanceAndClass_rank_greater_than());
-  
-    // Extract min (k) times 
-	for (int i = 0; i < k; i++) {
-		shortestKDistances[i][0] = distanceAndClassVector.front()->distance;
-		shortestKDistances[i][1] = (float)distanceAndClassVector.front()->assignedClass;
-		std::pop_heap (distanceAndClassVector.begin(), distanceAndClassVector.end(), DistanceAndClass_rank_greater_than());
-		distanceAndClassVector.pop_back();
-	}
-	// printf("final: shortestKDistances[0]: %f, shortestKDistances[1]: %f\n", shortestKDistances[0], shortestKDistances[1]);
-}
-
 // Uses a shared memory reduction approach to find the smallest k values
 __global__ void deviceFindMinK(float *d_smallestK, int *d_smallestKClasses, float *d_distanceMatrix, int startingDistanceIndex, int yIndex, int *d_actualClasses, int numInstances, int k) {
 	if (threadIdx.x == 0) { // TODO remove startingDistanceIndex and replace yIndex with tidY replace startingDistanceIndex with tidY * numInstances
@@ -232,7 +138,6 @@ __global__ void deviceFindMinK(float *d_smallestK, int *d_smallestKClasses, floa
 	}
 }
 
-
 // TODO call this with the correct dimensions
 __global__ void makePredicitions(int *d_predictions, float *d_smallestK, int *d_smallestKClasses, int sizeOfSmallest, int startingDistanceIndex, int yIndex, int k) {
 	if (threadIdx.x == 0) { // TODO remove startingDistanceIndex and replace yIndex with tidY replace startingDistanceIndex with tidY * k
@@ -321,25 +226,6 @@ __global__ void makePredicitions(int *d_predictions, float *d_smallestK, int *d_
 		}
 		
 		d_predictions[yIndex] = voteResult;
-	}
-}
-
-
-void hostFindKNN(float *h_distanceMatrix, float *h_datasetArray, int *h_predictions, int width, int numberOfAttributes, int k) { // h_distanceMatrix is a square matrix
-	for (int i = 0; i < width; i++) {
-		std::vector<DistanceAndClass*> distanceAndClassVector;
-
-		for (int j = 0; j < width; j++) {
-			float distance = sqrt(h_distanceMatrix[i*width + j]);
-			int assignedClass = (int)h_datasetArray[j*numberOfAttributes + numberOfAttributes -1];
-			DistanceAndClass* distanceAndClass = newDistanceAndClass(distance, assignedClass);
-			distanceAndClassVector.push_back(distanceAndClass);
-		}
-
-		float shortestKDistances[k][2];
-		kthSmallest(distanceAndClassVector, k, shortestKDistances);
-
-		h_predictions[i] = kVoting(k, shortestKDistances);
 	}
 }
 
@@ -444,17 +330,6 @@ int main(int argc, char* argv[])
 	// dim3 blockSize(threadsPerBlockDim, threadsPerBlockDim);
 	// dim3 gridSize(gridDimSize, gridDimSize);
 
-	// TODO avoid this copy if possible
-	cudaMemcpy(h_distanceMatrix, d_distanceMatrix, dataset->num_instances() * dataset->num_instances() * sizeof(int), cudaMemcpyDeviceToHost);
-
-	printf("\nh_distanceMatrix:\n");
-	for (int i = 0; i < dataset->num_instances(); i++) {
-		for (int j = 0; j < dataset->num_instances(); j++) {
-			printf("%f, ", h_distanceMatrix[i*dataset->num_instances() + j]);
-		}
-		printf("\n");
-	}
-
 	printf("actual classes host:\n");
 	int *h_actualClasses = (int *)malloc(dataset->num_instances() * sizeof(int));
 	// cudaMallocHost(&h_actualClasses, dataset->num_instances() * sizeof(int));
@@ -514,17 +389,6 @@ int main(int argc, char* argv[])
 	cudaEventElapsedTime(&milliseconds, start, stop);
 	printf("time to make predictions %f ms\n", milliseconds);
 
-
-
-
-
-
-	// knn(dataset, k, d_datasetArray, d_predictions);
-
-	// matrixMul<<<gridSize, blockSize>>>(d_datasetArray, d_distanceMatrix, d_predictions, matrixSize);
-
-	
-	// hostFindKNN(h_distanceMatrix, h_datasetArray, h_predictions, dataset->num_instances(), dataset->num_attributes(), k);
 
 	for (int i = 0; i < dataset->num_instances(); i++) {
 		printf("actual: %d, predicted: %d\n", h_actualClasses[i], h_predictions[i]);
