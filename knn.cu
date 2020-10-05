@@ -47,9 +47,9 @@ __global__ void deviceFindMinK(float *d_smallestK, int *d_smallestKClasses, floa
 	int tid_y  = blockIdx.y*blockDim.y + threadIdx.y;
 	int startingDistanceIndex = tid_y * numInstances; // NOTE startingDistanceIndex is used to access the proper "row" of the distance matrix
 
-	if (tid_x == 0 && tid_y == 0) {
-		printf("\nin deviceFindMinK blockDim.x: %d, blockDim.y: %d, gridDim.x: %d, gridDim.y: %d:\n", blockDim.x, blockDim.y, gridDim.x, gridDim.y);
-	}
+	// if (tid_x == 0 && tid_y == 0) {
+	// 	printf("\nin deviceFindMinK blockDim.x: %d, blockDim.y: %d, gridDim.x: %d, gridDim.y: %d:\n", blockDim.x, blockDim.y, gridDim.x, gridDim.y);
+	// }
 
 	sharedDistanceMemory[threadIdx.y][threadIdx.x] = (tid_x < numInstances) && (tid_y < numInstances) ? d_distanceMatrix[startingDistanceIndex + tid_x] : FLT_MAX;
 	sharedClassMemory[threadIdx.y][threadIdx.x] = (tid_x < numInstances) && (tid_y < numInstances) ? d_actualClasses[tid_x] : -1;
@@ -122,9 +122,9 @@ __global__ void makePredictions(int *d_predictions, float *d_smallestK, int *d_s
 	int startingDistanceIndex = ((tid_y * gridDim.x) * (blockDim.x/k)) * k; // NOTE startingDistanceIndex is used to access the proper "row" of the smallestK matrix
 	// TODO test at higher instances values
 
-	if (tid_x == 0 && tid_y == 0) {
-		printf("\nin makePredictions blockDim.x: %d, blockDim.y: %d, gridDim.x: %d, gridDim.y: %d:\n\n", blockDim.x, blockDim.y, gridDim.x, gridDim.y);
-	}
+	// if (tid_x == 0 && tid_y == 0) {
+	// 	printf("\nin makePredictions blockDim.x: %d, blockDim.y: %d, gridDim.x: %d, gridDim.y: %d:\n\n", blockDim.x, blockDim.y, gridDim.x, gridDim.y);
+	// }
 
 	int prevS = blockDim.x; // TODO works at max k?
 
@@ -138,7 +138,7 @@ __global__ void makePredictions(int *d_predictions, float *d_smallestK, int *d_s
 
 			for (int i = 0; i < k; i++) {
 				if (d_smallestK[rightIndex] < d_smallestK[leftIndex]) {
-					result[i] = d_smallestK[rightIndex];
+					result[i] = d_smallestK[rightIndex]; // TODO bug, when I print these result arrays after the fact, they only have values of 0, even though the d_smallestK have non zeroes
 					resultClasses[i] = d_smallestKClasses[rightIndex];
 					rightIndex++;
 				} else {
@@ -255,7 +255,8 @@ int main(int argc, char* argv[])
 	cudaEvent_t start, stop;
 	cudaEventCreate(&start);
 	cudaEventCreate(&stop);
-	float milliseconds = 0;
+	float distanceMilliseconds = 0;
+	float predictionMilliseconds = 0;
 
 	// distance matrix
 	int gridDimSize = (dataset->num_instances() + DISTANCETHREADSPERBLOCKDIM - 1) / DISTANCETHREADSPERBLOCKDIM;
@@ -263,7 +264,7 @@ int main(int argc, char* argv[])
 	dim3 blockSize(DISTANCETHREADSPERBLOCKDIM, DISTANCETHREADSPERBLOCKDIM);
 	dim3 gridSize(gridDimSize, gridDimSize);
 
-	printf("CUDA kernel launch with %dx%d blocks of %dx%d threads\n", gridDimSize, gridDimSize, DISTANCETHREADSPERBLOCKDIM, DISTANCETHREADSPERBLOCKDIM);
+	// printf("CUDA kernel launch with %dx%d blocks of %dx%d threads\n", gridDimSize, gridDimSize, DISTANCETHREADSPERBLOCKDIM, DISTANCETHREADSPERBLOCKDIM);
 	
 	cudaEventRecord(start);
 
@@ -271,18 +272,19 @@ int main(int argc, char* argv[])
 
 	cudaEventRecord(stop);
 	cudaEventSynchronize(stop);
-	cudaEventElapsedTime(&milliseconds, start, stop);
-	printf("GPU time to fill Distance Matrix %f ms\n", milliseconds);
+	cudaEventElapsedTime(&distanceMilliseconds, start, stop);
+	printf("GPU time to fill Distance Matrix %f ms\n", distanceMilliseconds);
 
 
 
 	// matrix reduction
+	cudaEventRecord(start);
 	// reductionBlocksPerGridX is number of blocks (where block has 256 threads) to do all elements in row (dataset->num_instances())
 	int reductionBlocksPerGridX = (dataset->num_instances() + REDUCTIONTHREADSBLOCKDIMX - 1) / REDUCTIONTHREADSBLOCKDIMX;
 	int reductionBlocksPerGridY = (dataset->num_instances() + REDUCTIONTHREADSBLOCKDIMY - 1) / REDUCTIONTHREADSBLOCKDIMY;
 
-	printf("\nreduction dims: REDUCTIONTHREADSBLOCKDIMX: %d, REDUCTIONTHREADSBLOCKDIMY: %d, reductionBlocksPerGridX: %d, reductionBlocksPerGridY: %d\n",
-	REDUCTIONTHREADSBLOCKDIMX, REDUCTIONTHREADSBLOCKDIMY, reductionBlocksPerGridX, reductionBlocksPerGridY);
+	// printf("\nreduction dims: REDUCTIONTHREADSBLOCKDIMX: %d, REDUCTIONTHREADSBLOCKDIMY: %d, reductionBlocksPerGridX: %d, reductionBlocksPerGridY: %d\n",
+	// REDUCTIONTHREADSBLOCKDIMX, REDUCTIONTHREADSBLOCKDIMY, reductionBlocksPerGridX, reductionBlocksPerGridY);
 
 	dim3 reductionBlockSize(REDUCTIONTHREADSBLOCKDIMX, REDUCTIONTHREADSBLOCKDIMY); // 256 * 4 <= 1024
 	dim3 reductionGridSize(reductionBlocksPerGridX, reductionBlocksPerGridY);
@@ -324,8 +326,8 @@ int main(int argc, char* argv[])
 	int predictionBlocksPerGridX = (numberOfKSegmentsPerRow + 1024 - 1) / 1024;
 	int predictionBlocksPerGridY = (dataset->num_instances() + maxNumberOFInstancesToPredictAtOnce - 1) / maxNumberOFInstancesToPredictAtOnce;
 
-	printf("\nprediction dims: numberOfKSegmentsPerRow: %d, maxNumberOFInstancesToPredictAtOnce: %d, predictionBlocksPerGridX: %d, predictionBlocksPerGridY: %d\n",
-		numberOfKSegmentsPerRow, maxNumberOFInstancesToPredictAtOnce, predictionBlocksPerGridX, predictionBlocksPerGridY);
+	// printf("\nprediction dims: numberOfKSegmentsPerRow: %d, maxNumberOFInstancesToPredictAtOnce: %d, predictionBlocksPerGridX: %d, predictionBlocksPerGridY: %d\n",
+		// numberOfKSegmentsPerRow, maxNumberOFInstancesToPredictAtOnce, predictionBlocksPerGridX, predictionBlocksPerGridY);
 
 	dim3 predictionBlockSize(numberOfKSegmentsPerRow, maxNumberOFInstancesToPredictAtOnce);
 	dim3 predictionGridSize(predictionBlocksPerGridX, predictionBlocksPerGridY);
@@ -343,8 +345,11 @@ int main(int argc, char* argv[])
 
 	cudaEventRecord(stop);
 	cudaEventSynchronize(stop);
-	cudaEventElapsedTime(&milliseconds, start, stop);
-	printf("time to make predictions %f ms\n", milliseconds);
+	cudaEventElapsedTime(&predictionMilliseconds, start, stop);
+	printf("time to make predictions %f ms\n", predictionMilliseconds);
+
+
+	printf("total GPU time: %f ms\n", distanceMilliseconds + predictionMilliseconds);
 
 
 
