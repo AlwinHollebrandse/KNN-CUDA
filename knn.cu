@@ -208,7 +208,7 @@ __global__ void makePredictions(int *d_predictions, float *d_smallestK, int *d_s
 			for (int i = 0; i < k; i++) {
 				if (threadIdx.x == 0 && yIndex == YINDEXTOCHECK)
 					printf("tid: %d, prevS: %d, s:%d, leftIndex: %d, leftdistance: %f, rightIndex: %d, rightdistance: %f\n", tid, prevS, s, leftIndex, d_smallestK[leftIndex], rightIndex, d_smallestK[rightIndex]);
-				if (rightIndex < blockDim.x && d_smallestK[rightIndex] < d_smallestK[leftIndex]) {
+				if (rightIndex < (startingDistanceIndex + (blockDim.x * gridDim.x)) && d_smallestK[rightIndex] < d_smallestK[leftIndex]) {
 					result[i] = d_smallestK[rightIndex];
 					resultClasses[i] = d_smallestKClasses[rightIndex];
 					rightIndex++;
@@ -226,8 +226,8 @@ __global__ void makePredictions(int *d_predictions, float *d_smallestK, int *d_s
 			}
 
 			for (int i = 0; i < k; i++) {
-				d_smallestK[threadIdx.x + i] = result[i];
-				d_smallestKClasses[threadIdx.x + i] = resultClasses[i];
+				d_smallestK[threadIdx.x + startingDistanceIndex + i] = result[i];
+				d_smallestKClasses[threadIdx.x + startingDistanceIndex + i] = resultClasses[i];
 			}
 		}
 		
