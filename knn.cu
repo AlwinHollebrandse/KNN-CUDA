@@ -63,13 +63,9 @@ __global__ void deviceFindMinK(float *d_smallestK, int *d_smallestKClasses, floa
 	int prevS = blockDim.x; // TODO works at max k?
 
 	for (int s = (((blockDim.x + k - 1) / k) / 2) * k; s < prevS; s = (((s / k) + 2 - 1) / 2) * k) { // (ceil(blocksSizeK left / 2) * k)  TODO what happens when k > blockDim?
-		if (tid_x == 0 && tid_y == 0) {
-			printf("\nhere1\n");
-		}
 		if (threadIdx.x < s && threadIdx.x % k == 0 && tid_y < numInstances) { // TODO check if tid_y < numInstances? to prevent precitions for the excess 'y' dim blocks?
 			int leftIndex = threadIdx.x;
 			int rightIndex = leftIndex + s;
-			// printf("s: %d, leftIndex: %d, rightIndex: %d\n", s, leftIndex, rightIndex);
 			float* result = new float[k]; // TODO does something need to be freed?
 			int* resultClasses = new int[k]; // TODO does something need to be freed?
 
@@ -80,10 +76,6 @@ __global__ void deviceFindMinK(float *d_smallestK, int *d_smallestKClasses, floa
 				if (actualEndingIndex >= REDUCTIONTHREADSBLOCKDIMX)
 					actualEndingIndex = REDUCTIONTHREADSBLOCKDIMX;
 				thrust::sort_by_key(thrust::seq, sharedDistanceMemory[threadIdx.y] + rightIndex, sharedDistanceMemory[threadIdx.y] + actualEndingIndex, sharedClassMemory[threadIdx.y] + rightIndex);
-			}
-
-			if (tid_x == 0 && tid_y == 0) {
-				printf("\nhere2\n");
 			}
 
 			for (int i = 0; i < k; i++) {
@@ -98,10 +90,6 @@ __global__ void deviceFindMinK(float *d_smallestK, int *d_smallestKClasses, floa
 				}
 			}
 
-			// if (tid_x == 0 && tid_y == 0) {
-			// 	printf("\nhere4\n");
-			// }
-
 			for (int i = 0; i < k; i++) {
 				sharedDistanceMemory[threadIdx.y][threadIdx.x + i] = result[i];
 				sharedClassMemory[threadIdx.y][threadIdx.x + i] = resultClasses[i];
@@ -112,21 +100,6 @@ __global__ void deviceFindMinK(float *d_smallestK, int *d_smallestKClasses, floa
 
 		__syncthreads();
 	}
-
-	// if (tid_x == 256 && tid_y == 0) {
-	// 	int start = 0;
-	// 	int end = start + k;
-	// 	printf("\n block final smallest k:\n");
-	// 	for (int i = start; i < end; i++) {
-	// 		printf("%f, ", sharedDistanceMemory[threadIdx.y][i]);
-	// 	}
-	// 	printf("\n");
-	// 	printf("\n block final classes of smallest k:\n");
-	// 	for (int i = start; i < end; i++) {
-	// 		printf("%d, ", sharedClassMemory[threadIdx.y][i]);
-	// 	}
-	// 	printf("\n");
-	// }
 
 	// write your nearestK to global mem
 	if (threadIdx.x == 0 && tid_y < numInstances) {
@@ -141,28 +114,11 @@ __global__ void deviceFindMinK(float *d_smallestK, int *d_smallestKClasses, floa
 			j++;
 		}
 	}
-
-	// __syncthreads();
-
-	// if (tid_x == 0 && tid_y == 335) {
-	// 	printf("\n d_smallestK final smallest k:\n");
-	// 	for (int i = 0; i < 4 * k; i++) {
-	// 		printf("%f, ", d_smallestK[i]);
-	// 	}
-	// 	printf("\n");
-	// 	printf("\n d_smallestKClasses final smallest k:\n");
-	// 	for (int i = 0; i < 4 * k; i++) {
-	// 		printf("%d, ", d_smallestKClasses[i]);
-	// 	}
-	// 	printf("\n");
-	// }
 }
 
-// TODO call this with the correct dimensions // TODO remove sizeOfSmallest? the block dims make it impossible
 __global__ void makePredictions(int *d_predictions, float *d_smallestK, int *d_smallestKClasses, int numInstances, int k) {
 	int tid_x = blockIdx.x*blockDim.x + threadIdx.x;
 	int tid_y  = blockIdx.y*blockDim.y + threadIdx.y;
-	// int startingDistanceIndex = ((tid_y * gridDim.x) + (tid_x/blockDim.x)) * k; // NOTE startingDistanceIndex is used to access the proper "row" of the smallestK matrix
 	int startingDistanceIndex = ((tid_y * gridDim.x) * (blockDim.x/k)) * k; // NOTE startingDistanceIndex is used to access the proper "row" of the smallestK matrix
 	// TODO test at higher instances values
 
@@ -171,99 +127,28 @@ __global__ void makePredictions(int *d_predictions, float *d_smallestK, int *d_s
 	}
 
 	int prevS = blockDim.x; // TODO works at max k?
-	// if (tid_x == 0 && tid_y == 0) {
-	// 	printf("prevS: %d\n", prevS);
-	// }
-
-	// if (tid_x == 0 && tid_y == 0) {
-	// 	printf("\n first Instance\n");
-	// 	for (int i = 0; i < prevS; i++) {
-	// 		printf("%f, ", d_smallestK[i]);
-	// 	}
-	// }
 
 	for (int s = (((blockDim.x + k - 1) / k) / 2) * k; s < prevS; s = (((s / k) + 2 - 1) / 2) * k) { // (ceil(blocksSizeK left / 2) * k)  TODO what happens when k > blockDim?
 		if (threadIdx.x < s && threadIdx.x % k == 0 && tid_y < numInstances) {
 			int leftIndex = threadIdx.x + startingDistanceIndex;
 			int rightIndex = leftIndex + s;
 
-			// if (tid_x == 0 && tid_y == 335) {
-			// 	// int endingDistanceIndex = startingDistanceIndex + k;
-			// 	// printf("\n d_smallestK, prevS: %d, leftIndex: %d, rightIndex: %d:\n", prevS, leftIndex, rightIndex); // LEFT SHOULD BE 10!
-			// 	// for (int i = leftIndex; i < leftIndex + k; i++) {
-			// 	// 	printf("%f, ", d_smallestK[i]);
-			// 	// }
-			// 	printf("\n d_smallestK, prevS: %d, rightIndex: %d:\n", prevS, rightIndex);
-			// 	for (int i = rightIndex; i < rightIndex + k; i++) {
-			// 		printf("%f, ", d_smallestK[i]);
-			// 	}
-			// 	// printf("\nhardcoded:\n");
-			// 	// printf("d_smallestK[0]: %f\n", d_smallestK[0]);
-			// 	// printf("d_smallestK[1]: %f\n", d_smallestK[1]);
-			// 	// printf("d_smallestK[2]: %f\n", d_smallestK[2]);
-			// 	// printf("d_smallestK[3]: %f\n", d_smallestK[3]);
-			// 	// printf("d_smallestK[4]: %f\n", d_smallestK[4]);
-
-			// 	printf("\n\n");
-
-			// 	// printf("\n d_smallestKClasses, prevS: %d:\n", prevS);
-			// 	// for (int i = rightIndex; i < rightIndex + k; i++) {
-			// 	// 	printf("%d, ", d_smallestKClasses[i]);
-			// 	// }
-			// 	// printf("\n\n");
-			// }
-
-			// printf("s: %d, tid_y: %d,  leftIndex: %d, rightIndex: %d\n", s, tid_y, leftIndex, rightIndex);
 			float* result = new float[k]; // TODO does something need to be freed?
 			int* resultClasses = new int[k]; // TODO does something need to be freed?
 
 			for (int i = 0; i < k; i++) {
-				// if (tid_x == 0 && tid_y == 335)
-				// 		printf("\ninside leftIndex: %d, d_smallestK[leftIndex]: %f ...  rightIndex: %d, d_smallestK[rightIndex]: %f\n", leftIndex, d_smallestK[leftIndex], rightIndex, d_smallestK[rightIndex]);
-
 				if (d_smallestK[rightIndex] < d_smallestK[leftIndex]) {
-					// if (tid_x == 0 && tid_y == 335)
-					// 	printf("\n used right\n");//inside rightIndex: %d, d_smallestK[rightIndex]: %f\n", rightIndex, d_smallestK[rightIndex]);
-
 					result[i] = d_smallestK[rightIndex];
 					resultClasses[i] = d_smallestKClasses[rightIndex];
 					rightIndex++;
 				} else {
-					// if (tid_x == 0 && tid_y == 335)
-					// 	printf("\n used left\n");//inside leftIndex: %d, d_smallestK[leftIndex]: %f\n", leftIndex, d_smallestK[leftIndex]);
-
 					result[i] = d_smallestK[leftIndex];
 					resultClasses[i] = d_smallestKClasses[leftIndex];
 					leftIndex++;
 				}
-				
-				// if (tid_x == 0 && tid_y == 1) {
-				// 	// int endingDistanceIndex = startingDistanceIndex + k;
-				// 	printf("\n after merge d_smallestK, prevS: %d, leftIndex: %d, rightIndex: %d:\n", prevS, leftIndex, rightIndex);
-				// 	for (int i = leftIndex; i < leftIndex + k; i++) {
-				// 		printf("leftIndex: %d, d_smallestK[leftIndex]: %f\n", leftIndex, d_smallestK[leftIndex]);
-				// 	}
-				// }
 			}
-
-			// int startingKIndex = ((tid_y * gridDim.x) + (tid_x/blockDim.x)) * k;
-			int endingKIndex = startingDistanceIndex + k;
-			// if (tid_x == 0 && tid_y == 1) {
-			// 	printf("\ntid_y: %d, threadIdx.x: %d, startingKIndex: %d\n", tid_y, threadIdx.x, startingDistanceIndex);
-			// 	// printf("\nresult:\n");
-			// 	// for (int i = 0; i < k; i++) {
-			// 	// 	printf("%f, ", result[i]);
-			// 	// }
-			// 	// printf("\nresultClasses:\n");
-			// 	// for (int i = 0; i < k; i++) {
-			// 	// 	printf("%d, ", resultClasses[i]);
-			// 	// }
-			// 	printf("\n");
-			// }
-
-			// for (int i = startingDistanceIndex; i < endingKIndex; i++) {
+			
 			for (int i = 0; i < k; i++) {
-				// printf("tid_y: %d, threadIdx.x + startingDistanceIndex + i: %d, i: %d, result: %d\n", tid_y, threadIdx.x + startingDistanceIndex + i, i, result[i]);
 				d_smallestK[threadIdx.x + startingDistanceIndex + i] = result[i];
 				d_smallestKClasses[threadIdx.x + startingDistanceIndex + i] = resultClasses[i];
 			}
@@ -273,47 +158,22 @@ __global__ void makePredictions(int *d_predictions, float *d_smallestK, int *d_s
 		__syncthreads();
 	}
 
-	// if (tid_x == 0 && tid_y == 335) {
-	// 	printf("\n final reduced d_smallestK:\n"); // THESE SHOULD BE THE REDUCED RESULTS NOW
-	// 	for (int i = 0; i < 4 * k; i++) {
-	// 		printf("%f, ", d_smallestK[i]);
-	// 	}
-	// 	printf("\n\n");
-
-	// 	printf("\n final reduced d_smallestKClasses:\n");
-	// 	for (int i = 0; i < 4 * k; i++) {
-	// 		printf("%d, ", d_smallestKClasses[i]);
-	// 	}
-	// 	printf("\n\n");
-	// }
-
-	// __syncthreads(); // TODO delete with above print block
-
 	// make predictions
 	// get max class
 	if (threadIdx.x == 0 && threadIdx.y < numInstances) {
 		int endingDistanceIndex = startingDistanceIndex + k;
 		// printf("making prediction, \n");
 		int maxClass = 0;
-		for (int i = startingDistanceIndex; i < endingDistanceIndex; i++) {  // TODO when 2d make startingDistanceIndex be the start
+		for (int i = startingDistanceIndex; i < endingDistanceIndex; i++) {
 			if (d_smallestKClasses[i] > maxClass)
 				maxClass = d_smallestKClasses[i];
 		}
-		// printf("maxClass: %d\n", maxClass);
 
 		int* classCounter = new int[maxClass + 1]; // TODO does something need to be freed?
-		for (int i = startingDistanceIndex; i < endingDistanceIndex; i++) { // TODO when 2d make startingDistanceIndex be the start
+		for (int i = startingDistanceIndex; i < endingDistanceIndex; i++) {
 			classCounter[d_smallestKClasses[i]]++;
 		}
 
-		// if (tid_x == 0 && tid_y == 0) {
-		// 	printf("\n classCounter:\n");
-		// 	for (int i = 0; i <= maxClass; i++) {
-		// 		printf("%d, ", classCounter[i]);
-		// 	}
-		// 	printf("\n");
-		// }
-		
 		int voteResult = -1;
 		int numberOfVotes = -1;
 		for (int i = 0; i <= maxClass; i++) {
@@ -323,8 +183,6 @@ __global__ void makePredictions(int *d_predictions, float *d_smallestK, int *d_s
 			}
 		d_predictions[tid_y] = voteResult;
 		}
-		
-		// d_predictions[tid_y] = 0;
 	}
 }
 
