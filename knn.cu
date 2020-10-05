@@ -76,6 +76,9 @@ __global__ void deviceFindMinK(float *d_smallestK, int *d_smallestKClasses, floa
 		if (threadIdx.x < s && threadIdx.x % k == 0) {
 			int leftIndex = threadIdx.x;
 			int rightIndex = leftIndex + s;
+			if (rightIndex >= prevS) { // if youre merging with a "chunk" that was already merged, dont merge . EX: on 2nd iteraition where whole size is 16 and k = 3. 
+				rightIndex = leftIndex + k - 1;
+			}
 			float* result = new float[k]; // TODO does something need to be freed?
 			int* resultClasses = new int[k]; // TODO does something need to be freed?
 
@@ -88,15 +91,46 @@ __global__ void deviceFindMinK(float *d_smallestK, int *d_smallestKClasses, floa
 				thrust::sort_by_key(thrust::seq, sharedDistanceMemory + rightIndex, sharedDistanceMemory + actualEndingIndex, sharedClassMemory + rightIndex);
 			}
 
+			bool containsNumber = false;
+			float number = 20.880613;
 			for (int i = 0; i < k; i++) {
+				if (sharedDistanceMemory[leftIndex + i] == number || rightIndex, sharedDistanceMemory[rightIndex + i] == number) {
+					containsNumber = true;
+					break;
+				}
+			}
+
+			if (tid == 256 && yIndex == YINDEXTOCHECK)
+				printf("s: %d\n", s);
+			
+			if (tid > 255 && yIndex == YINDEXTOCHECK && containsNumber) {
+				printf("\n\ntid: %d, s:%d, leftIndex: %d, rightIndex: %d leftIndexValues:\n", tid, s, leftIndex, rightIndex);
+				for (int i = 0; i < k; i++) {
+					printf("%f, ", sharedDistanceMemory[leftIndex + i]);
+				}
+				printf("\n rigtIndexValues:\n");
+				for (int i = 0; i < k; i++) {
+					printf("%f, ", sharedDistanceMemory[rightIndex + i]);
+				}
+			}
+
+			for (int i = 0; i < k; i++) { // TODO on small dataset, the final instance gets an extra distnace of "20.880613" instead of "21.095022" The actual dataset has 1 20.88 value				
+				// if (tid > 255 && yIndex == YINDEXTOCHECK)
+				// 	printf("tid: %d, prevS: %d, s:%d, leftIndex: %d, leftdistance: %f, rightIndex: %d, rightdistance: %f\n", tid, prevS, s, leftIndex, sharedDistanceMemory[leftIndex], rightIndex, sharedDistanceMemory[rightIndex]);
 				if (rightIndex < blockDim.x && sharedDistanceMemory[rightIndex] < sharedDistanceMemory[leftIndex]) {
 					result[i] = sharedDistanceMemory[rightIndex];
 					resultClasses[i] = sharedClassMemory[rightIndex];
 					rightIndex++;
+
+					// if (threadIdx.x == 0 && yIndex == YINDEXTOCHECK)
+					// 	printf("used rightIndex i: %d, result[i]: %f\n", i, result[i]);
 				} else {
 					result[i] = sharedDistanceMemory[leftIndex];
 					resultClasses[i] = sharedClassMemory[leftIndex];
 					leftIndex++;
+
+					// if (threadIdx.x == 0 && yIndex == YINDEXTOCHECK)
+					// 	printf("used leftIndex i: %d, result[i]: %f\n", i, result[i]);
 				}
 			}
 
@@ -193,7 +227,7 @@ __global__ void makePredictions(int *d_predictions, float *d_smallestK, int *d_s
 		printf("\n\n");
 	}
 
-	int prevS = blockDim.x;
+	int prevS = blockDim.x; // blockDim.x will always be a multiple of k
 
 	for (int s = (((prevS + k - 1) / k) / 2) * k; s < prevS; s = (((s / k) + 2 - 1) / 2) * k) { // (ceil(blocksSizeK left / 2) * k)  TODO what happens when k > blockDim?
 		if (threadIdx.x < s && threadIdx.x % k == 0 && threadIdx.x < sizeOfSmallest) {
@@ -214,14 +248,14 @@ __global__ void makePredictions(int *d_predictions, float *d_smallestK, int *d_s
 					rightIndex++;
 
 					if (threadIdx.x == 0 && yIndex == YINDEXTOCHECK)
-						printf("used rightIndex i: %d, result[i]: %f\n", i, result[i]);//: rightIndex: %d, distance: %f\n", rightIndex, d_smallestK[rightIndex]);
+						printf("used rightIndex i: %d, result[i]: %f\n", i, result[i]);
 				} else {
 					result[i] = d_smallestK[leftIndex];
 					resultClasses[i] = d_smallestKClasses[leftIndex];
 					leftIndex++;
 
 					if (threadIdx.x == 0 && yIndex == YINDEXTOCHECK)
-						printf("used leftIndex i: %d, result[i]: %f\n", i, result[i]);//: leftIndex: %d, distance: %f\n", leftIndex, d_smallestK[leftIndex]);
+						printf("used leftIndex i: %d, result[i]: %f\n", i, result[i]);
 				}
 			}
 
